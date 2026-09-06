@@ -1,0 +1,19 @@
+out/
+build/
+third_party/pdfium/
+.vs/
+compile_commands.json
+*.user
+
+# qpdf 的執行檔以 tools/qpdf/fetch_qpdf.bat 取得，不進版控（與 pdfium 同樣的處理）。
+# README.md 要留著，它記錄了為什麼選官方發行版而不是 vcpkg。
+third_party/qpdf/bin/
+
+# 基準影像（tests/golden/）是要進版控的驗收資產，不得排除——
+# 沒有它們，渲染回歸測試每次都只會「建立基準」而永遠不比對。
+# 失敗時產生的實際輸出與差異圖寫在建置目錄下，已被上面的 out/ 涵蓋。
+
+# 隨附的 CJK 字型（ADR-007）。與 PDFium 同樣不進版控：11 MB 的二進位檔，
+# 取得方式寫在 CLAUDE.md。授權檔（OFL.txt）必須隨字型一起散布，因此保留。
+third_party/fonts/*.ttf
+third_party/fonts/*.otf

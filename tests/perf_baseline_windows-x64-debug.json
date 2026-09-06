@@ -1,0 +1,8 @@
+{
+  "coldStartMs": 242.443,
+  "pageFlipUncachedP95Ms": 56.454,
+  "zoomFirstTileP95Ms": 6.777,
+  "tileP95Ms": 10.724,
+  "idlePrivateMB": 304.879,
+  "searchMs": 4059.636
+}

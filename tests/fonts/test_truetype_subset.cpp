@@ -222,6 +222,151 @@ struct SyntheticFont {
     return SyntheticFont{out, glyphCount};
 }
 
+// F-001 回歸測試專用：一份只放 cmap format 4 + format 12 兩張子表的最小字型，
+// format 12 裡塞一個會在 32 位元加法上溢位環繞的群組。
+[[nodiscard]] std::string buildFontWithOverflowingCmap12() {
+    const std::uint16_t glyphCount = 3;  // 0 = .notdef、1 = 'A'、2 = 未使用
+
+    std::vector<std::string> glyphs{simpleGlyph(), simpleGlyph(), simpleGlyph()};
+    std::string glyf;
+    std::vector<std::uint32_t> offsets;
+    for (const std::string& glyph : glyphs) {
+        offsets.push_back(static_cast<std::uint32_t>(glyf.size()));
+        glyf += glyph;
+    }
+    offsets.push_back(static_cast<std::uint32_t>(glyf.size()));
+
+    std::string loca;
+    for (const std::uint32_t offset : offsets) appendU32(loca, offset);
+
+    std::string head;
+    appendU32(head, 0x00010000);
+    appendU32(head, 0x00010000);
+    appendU32(head, 0);
+    appendU32(head, 0x5F0F3CF5);
+    appendU16(head, 0);
+    appendU16(head, 1000);
+    for (int i = 0; i < 16; ++i) head.push_back('\0');
+    appendU16(head, 0);
+    appendU16(head, 0);
+    appendU16(head, 1000);
+    appendU16(head, 1000);
+    appendU16(head, 0);
+    appendU16(head, 8);
+    appendU16(head, 2);
+    appendU16(head, 1);  // indexToLocFormat = long
+    appendU16(head, 0);
+
+    std::string hhea;
+    appendU32(hhea, 0x00010000);
+    appendU16(hhea, 800);
+    appendU16(hhea, static_cast<std::uint16_t>(-200));
+    appendU16(hhea, 0);
+    appendU16(hhea, 1000);
+    for (int i = 0; i < 11; ++i) appendU16(hhea, 0);
+    appendU16(hhea, glyphCount);
+
+    std::string maxp;
+    appendU32(maxp, 0x00010000);
+    appendU16(maxp, glyphCount);
+    for (int i = 0; i < 13; ++i) appendU16(maxp, 0);
+
+    std::string hmtx;
+    for (std::uint16_t i = 0; i < glyphCount; ++i) {
+        appendU16(hmtx, static_cast<std::uint16_t>(500 + i * 10));
+        appendU16(hmtx, 0);
+    }
+
+    // format 4：只放 'A'(0x41) → 1。讓 unicodeToGlyph 非空，字型本身有效，
+    // 這樣測試才是在驗證「format 12 的溢位群組被正確拒絕」，而不是在驗證
+    // 「整份字型因為沒有可用 cmap 而報錯」。
+    std::string format4;
+    appendU16(format4, 4);       // format
+    appendU16(format4, 0);       // length（稍後回填）
+    appendU16(format4, 0);       // language
+    appendU16(format4, 4);       // segCountX2（2 段）
+    appendU16(format4, 4);       // searchRange
+    appendU16(format4, 1);       // entrySelector
+    appendU16(format4, 4);       // rangeShift
+    appendU16(format4, 0x41);    // endCode[0]
+    appendU16(format4, 0xFFFF);  // endCode[1]
+    appendU16(format4, 0);       // reservedPad
+    appendU16(format4, 0x41);    // startCode[0]
+    appendU16(format4, 0xFFFF);  // startCode[1]
+    appendU16(format4, static_cast<std::uint16_t>(1 - 0x41));  // idDelta[0]
+    appendU16(format4, 1);                                     // idDelta[1]
+    appendU16(format4, 0);       // idRangeOffset[0]
+    appendU16(format4, 0);       // idRangeOffset[1]
+    format4[2] = static_cast<char>((format4.size() >> 8) & 0xFF);
+    format4[3] = static_cast<char>(format4.size() & 0xFF);
+
+    // format 12：一個群組，startGlyphID = 0xFFFFFFF0。
+    // 碼點 U+10011（code - start = 0x11）在 32 位元加法下是
+    // 0xFFFFFFF0 + 0x11 = 0x100000001，截斷後變成 0x1——看起來像
+    // 一個合法的小 glyph index（剛好等於 'A' 真正的 glyph）。
+    std::string format12;
+    appendU16(format12, 12);              // format
+    appendU16(format12, 0);               // reserved
+    appendU32(format12, 0);               // length（稍後回填）
+    appendU32(format12, 0);               // language
+    appendU32(format12, 1);               // numGroups
+    appendU32(format12, 0x10000);         // startCharCode
+    appendU32(format12, 0x10000 + 0x20);  // endCharCode
+    appendU32(format12, 0xFFFFFFF0u);     // startGlyphID
+    const auto format12Length = static_cast<std::uint32_t>(format12.size());
+    format12[4] = static_cast<char>((format12Length >> 24) & 0xFF);
+    format12[5] = static_cast<char>((format12Length >> 16) & 0xFF);
+    format12[6] = static_cast<char>((format12Length >> 8) & 0xFF);
+    format12[7] = static_cast<char>(format12Length & 0xFF);
+
+    std::string cmap;
+    appendU16(cmap, 0);  // version
+    appendU16(cmap, 2);  // numTables
+    appendU16(cmap, 3);  // platformID
+    appendU16(cmap, 1);  // encodingID（Unicode BMP → format 4）
+    const std::uint32_t format4Offset = 4 + 2 * 8;
+    appendU32(cmap, format4Offset);
+    appendU16(cmap, 3);   // platformID
+    appendU16(cmap, 10);  // encodingID（Unicode full → format 12）
+    const auto format12Offset =
+        static_cast<std::uint32_t>(format4Offset + format4.size());
+    appendU32(cmap, format12Offset);
+    cmap += format4;
+    cmap += format12;
+
+    struct Entry {
+        const char* tag;
+        std::string data;
+    };
+    std::vector<Entry> tables{{"cmap", cmap}, {"glyf", glyf},   {"head", head},
+                              {"hhea", hhea}, {"hmtx", hmtx},   {"loca", loca},
+                              {"maxp", maxp}};
+
+    std::string out;
+    appendU32(out, 0x00010000);
+    appendU16(out, static_cast<std::uint16_t>(tables.size()));
+    appendU16(out, 64);
+    appendU16(out, 2);
+    appendU16(out, static_cast<std::uint16_t>(tables.size() * 16 - 64));
+
+    std::uint32_t offset = 12 + static_cast<std::uint32_t>(tables.size()) * 16;
+    std::string body;
+    std::vector<std::uint32_t> starts;
+    for (const Entry& table : tables) {
+        starts.push_back(offset + static_cast<std::uint32_t>(body.size()));
+        body += table.data;
+        while (body.size() % 4 != 0) body.push_back('\0');
+    }
+    for (std::size_t i = 0; i < tables.size(); ++i) {
+        out += std::string(tables[i].tag, 4);
+        appendU32(out, 0);
+        appendU32(out, starts[i]);
+        appendU32(out, static_cast<std::uint32_t>(tables[i].data.size()));
+    }
+    out += body;
+    return out;
+}
+
 }  // namespace
 
 class TestTrueTypeSubset : public QObject {
@@ -336,6 +481,18 @@ private slots:
                                     .arg(QString::fromStdString(previous))
                                     .arg(QString::fromStdString(current))));
         }
+    }
+
+    void cmapFormat12OverflowIsRejectedNotAliased() {
+        // F-001：startGlyph + (code - start) 若在 32 位元上溢位，環繞後可能
+        // 變成一個看似合法、實際上與另一個真實字形撞號的小 glyph index。
+        // 必須明確找不到，不可以悄悄疊到別的字上。
+        const std::string font = buildFontWithOverflowingCmap12();
+        const SubsetResult result =
+            subsetTrueType(font, {U'A', static_cast<char32_t>(0x10011)});
+        QVERIFY2(result.ok, result.diagnostic.c_str());
+        QCOMPARE(result.glyphForCodepoint.at(U'A'), std::uint16_t(1));
+        QVERIFY(result.glyphForCodepoint.count(static_cast<char32_t>(0x10011)) == 0);
     }
 
     void cffFontsAreRejectedExplicitly() {

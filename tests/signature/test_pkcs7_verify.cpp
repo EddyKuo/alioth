@@ -6,6 +6,9 @@
 
 #include <QtTest>
 
+#include <algorithm>
+#include <climits>
+
 #include "engine/signature/pkcs7_verifier.h"
 #include "engine/signature/revocation.h"
 #include "engine/signature/trust_store.h"
@@ -276,6 +279,71 @@ private slots:
         QCOMPARE(withTransport.check(leaf_.cert, ca_.cert, 0), RevocationStatus::Unknown);
         // 沒有 URL 就不該產生任何對外請求。
         QVERIFY(!called);
+    }
+
+    // size_t → long/int 轉型截斷的迴歸測試（F-001/F-002）：pkcs7Der 與
+    // signedBytes 都來自不可信的 PDF 位元組，超過 OpenSSL API 能收的長度上限
+    // 時必須明確拒絕，不能靜默截斷後誤判驗證結果。這裡真的配置超過
+    // INT_MAX 位元組來釘住邊界，而不是只檢查函式簽章。
+    void oversizedSignedBytesIsRejectedNotTruncated() {
+        const auto data = payload("contract body v1");
+        const auto der = alioth::test::signDetached(leaf_, data, &ca_);
+        QVERIFY(!der.empty());
+
+        TrustStore store;
+        QVERIFY(store.addCertificatePem(alioth::test::certificatePem(ca_)));
+        VerifyOptions options;
+        options.revocationPolicy = RevocationPolicy::Skip;
+
+        std::vector<std::uint8_t> oversized;
+        oversized.resize(static_cast<std::size_t>(INT_MAX) + 1, 0);
+        // 把真正的簽署內容放在開頭：如果實作不小心把長度截斷成 int，
+        // PKCS7_verify 仍然可能「碰巧」在截斷後的資料上算出摘要相符，
+        // 讓這個測試看起來像誤判通過而不是真的截斷了。
+        std::copy(data.begin(), data.end(), oversized.begin());
+
+        const SignatureReport report = verifyDetachedPkcs7(
+            oversized, der, coverageOfWholeInput(static_cast<std::int64_t>(oversized.size())),
+            store, options);
+
+        QVERIFY(report.parsed);
+        QVERIFY(!report.digestMatches);
+        QVERIFY(!report.cryptographicallyValid);
+        QCOMPARE(report.trust, SignatureTrust::Invalid);
+        bool mentionsLimit = false;
+        for (const auto& finding : report.findings) {
+            if (finding.find("上限") != std::string::npos) mentionsLimit = true;
+        }
+        QVERIFY(mentionsLimit);
+    }
+
+    void oversizedPkcs7DerIsRejectedNotTruncated() {
+        // long 的寬度是 ABI 決定的：Windows（LLP64）是 32 位元，所以 size_t
+        // 真的可以超過 LONG_MAX，這條邊界必須釘住。Linux / macOS（LP64）
+        // 的 long 與 size_t 同寬，那條路徑不可能被觸發，而
+        // static_cast<std::size_t>(LONG_MAX) + 1 會變成 2^63——resize 到那個
+        // 大小會擲出 length_error，測試行程直接 terminate，看起來像崩潰而不是
+        // 「這個平台沒有這個邊界」。所以在那些平台明確跳過而不是嘗試配置。
+        if constexpr (sizeof(long) >= sizeof(std::size_t)) {  // NOLINT(google-runtime-int)
+            QSKIP("long 與 size_t 同寬：pkcs7Der.size() 不可能超過 LONG_MAX");
+        }
+
+        const auto data = payload("hello");
+        std::vector<std::uint8_t> oversizedDer;
+        oversizedDer.resize(static_cast<std::size_t>(LONG_MAX) + 1, 0);
+
+        TrustStore store;
+        const SignatureReport report = verifyDetachedPkcs7(
+            data, oversizedDer, coverageOfWholeInput(static_cast<std::int64_t>(data.size())), store,
+            VerifyOptions{});
+
+        QVERIFY(!report.parsed);
+        QCOMPARE(report.trust, SignatureTrust::Invalid);
+        bool mentionsLimit = false;
+        for (const auto& finding : report.findings) {
+            if (finding.find("上限") != std::string::npos) mentionsLimit = true;
+        }
+        QVERIFY(mentionsLimit);
     }
 
     void trimDerPaddingRemovesTrailingZeros() {

@@ -11,6 +11,7 @@
 #include <openssl/x509.h>
 #include <openssl/x509_vfy.h>
 
+#include <climits>
 #include <cstring>
 #include <ctime>
 
@@ -215,6 +216,14 @@ SignatureReport verifyDetachedPkcs7(const std::vector<std::uint8_t>& signedBytes
         return report;
     }
 
+    // d2i_PKCS7 只收 long 長度。pkcs7Der 來自不可信的 PDF，若靜默轉型截斷，
+    // 解析器會讀到被切斷的 DER 而不是明確拒絕——必須在轉型前就擋下來。
+    if (pkcs7Der.size() > static_cast<std::size_t>(LONG_MAX)) {
+        report.findings.emplace_back("PKCS#7 資料大小超出可解析上限，拒絕解析。");
+        finalize(report, options.revocationPolicy);
+        return report;
+    }
+
     const unsigned char* cursor = pkcs7Der.data();
     PKCS7* p7 = d2i_PKCS7(nullptr, &cursor, static_cast<long>(pkcs7Der.size()));
     if (!p7) {
@@ -233,7 +242,16 @@ SignatureReport verifyDetachedPkcs7(const std::vector<std::uint8_t>& signedBytes
 
     // 被簽的內容為空代表 /ByteRange 檢查已經判定沒有可驗的位元組。
     // 這種情況下不能宣稱驗證通過——直接留在 Invalid。
-    if (!signedBytes.empty() && store) {
+    //
+    // BIO_new_mem_buf 只收 int 長度。signedBytes 來自不可信的 PDF 檔案位元組，
+    // 若靜默轉型截斷，PKCS7_verify 會在被切斷的資料上做摘要比對——可能誤判
+    // 通過或誤判失敗，兩者都是安全性問題，所以超出上限一律明確拒絕驗證。
+    const bool signedBytesTooLarge = signedBytes.size() > static_cast<std::size_t>(INT_MAX);
+    if (signedBytesTooLarge) {
+        report.findings.emplace_back("待驗證的文件位元組數超出可驗證上限，拒絕驗證。");
+    }
+
+    if (!signedBytesTooLarge && !signedBytes.empty() && store) {
         BIO* data = BIO_new_mem_buf(signedBytes.data(), static_cast<int>(signedBytes.size()));
         if (data) {
             // 第一次：連憑證鏈一起驗。成功代表綠燈的前置條件全部滿足。

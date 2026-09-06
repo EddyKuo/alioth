@@ -90,6 +90,7 @@ domain::RectF clampToBox(const domain::RectF& box, const domain::RectF& bounds) 
 }
 
 int countWidgetAnnotations(FPDF_DOCUMENT document) {
+    const PdfiumGuard guard;  // 行程級序列化（ADR-005）：遞迴鎖，呼叫端是否已持鎖不重要。
     int total = 0;
     const int pages = FPDF_GetPageCount(document);
     for (int i = 0; i < pages; ++i) {
@@ -679,13 +680,16 @@ AssemblyResult extractPages(const std::string& sourcePath, const std::vector<int
 
     FPDF_DOCUMENT dest = toDocument(target.documentHandle());
     FPDF_DOCUMENT src = toDocument(source.documentHandle());
-    if (FPDF_ImportPagesByIndex(dest, src, pages.data(), static_cast<unsigned long>(pages.size()),
-                                0) == 0) {
-        result.status = PageEditStatus::PdfiumRejected;
-        result.message = "FPDF_ImportPagesByIndex 失敗";
-        return result;
+    {
+        const PdfiumGuard guard;  // 行程級序列化（ADR-005）：涵蓋這一件「搬頁面」工作。
+        if (FPDF_ImportPagesByIndex(dest, src, pages.data(), static_cast<unsigned long>(pages.size()),
+                                    0) == 0) {
+            result.status = PageEditStatus::PdfiumRejected;
+            result.message = "FPDF_ImportPagesByIndex 失敗";
+            return result;
+        }
+        FPDF_CopyViewerPreferences(dest, src);
     }
-    FPDF_CopyViewerPreferences(dest, src);
 
     result.forms.widgetAnnotations = countWidgetAnnotations(dest);
     result.pageCount = target.pageCount();
@@ -723,17 +727,20 @@ AssemblyResult mergeDocuments(const std::vector<std::string>& sourcePaths,
             return result;
         }
         FPDF_DOCUMENT src = toDocument(source.documentHandle());
-        // 一律附加在尾端：合併的順序就是使用者給的順序，不重新排列。
-        const int insertAt = FPDF_GetPageCount(dest);
-        if (FPDF_ImportPagesByIndex(dest, src, nullptr, 0, insertAt) == 0) {
-            result.status = PageEditStatus::PdfiumRejected;
-            result.message = "FPDF_ImportPagesByIndex 失敗：" + path;
-            return result;
-        }
-        if (!copiedPreferences) {
-            // 檢視器偏好只能有一份，取第一份文件的；後面的會被無聲蓋掉才是意外。
-            FPDF_CopyViewerPreferences(dest, src);
-            copiedPreferences = true;
+        {
+            const PdfiumGuard guard;  // 行程級序列化（ADR-005）：涵蓋這一件「搬頁面」工作。
+            // 一律附加在尾端：合併的順序就是使用者給的順序，不重新排列。
+            const int insertAt = FPDF_GetPageCount(dest);
+            if (FPDF_ImportPagesByIndex(dest, src, nullptr, 0, insertAt) == 0) {
+                result.status = PageEditStatus::PdfiumRejected;
+                result.message = "FPDF_ImportPagesByIndex 失敗：" + path;
+                return result;
+            }
+            if (!copiedPreferences) {
+                // 檢視器偏好只能有一份，取第一份文件的；後面的會被無聲蓋掉才是意外。
+                FPDF_CopyViewerPreferences(dest, src);
+                copiedPreferences = true;
+            }
         }
     }
 
@@ -783,13 +790,16 @@ SplitResult splitDocument(const std::string& sourcePath, const dom::SplitRule& r
             return result;
         }
         FPDF_DOCUMENT dest = toDocument(target.documentHandle());
-        if (FPDF_ImportPagesByIndex(dest, src, indices.data(),
-                                    static_cast<unsigned long>(indices.size()), 0) == 0) {
-            result.status = PageEditStatus::PdfiumRejected;
-            result.message = "FPDF_ImportPagesByIndex 失敗（第 " + std::to_string(fileIndex) + " 份）";
-            return result;
+        {
+            const PdfiumGuard guard;  // 行程級序列化（ADR-005）：涵蓋這一件「搬頁面」工作。
+            if (FPDF_ImportPagesByIndex(dest, src, indices.data(),
+                                        static_cast<unsigned long>(indices.size()), 0) == 0) {
+                result.status = PageEditStatus::PdfiumRejected;
+                result.message = "FPDF_ImportPagesByIndex 失敗（第 " + std::to_string(fileIndex) + " 份）";
+                return result;
+            }
+            FPDF_CopyViewerPreferences(dest, src);
         }
-        FPDF_CopyViewerPreferences(dest, src);
 
         const std::string path = formatSplitPath(targetPattern, fileIndex);
         const PageSaveResult saved = target.saveAsCopy(path);

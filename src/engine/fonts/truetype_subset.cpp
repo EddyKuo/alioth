@@ -99,8 +99,13 @@ void readCmapFormat12(const std::string& data, std::size_t base,
         const std::uint32_t startGlyph = readU32(data, at + 8);
         if (end < start || end - start > 0x10FFFF) continue;
         for (std::uint32_t code = start; code <= end; ++code) {
-            const std::uint32_t glyph = startGlyph + (code - start);
-            if (glyph != 0 && glyph <= 0xFFFF) {
+            // 用 64 位元累加：startGlyph 來自不可信的字型檔，可以逼近
+            // 0xFFFFFFFF，若在 32 位元上相加會溢位環繞，把一個原本無效的
+            // 巨大 glyph index 折成一個看似合法的小數字——那比直接被拒絕
+            // 更危險，會讓碼點悄悄疊到另一個不相干的既有字形上。
+            const std::uint64_t glyph =
+                static_cast<std::uint64_t>(startGlyph) + (code - start);
+            if (glyph != 0 && glyph <= 0xFFFFu) {
                 out.emplace(static_cast<char32_t>(code), static_cast<std::uint16_t>(glyph));
             }
         }
@@ -129,14 +134,21 @@ void collectComponents(const std::string& glyf, std::uint32_t glyphOffset,
         at += 4;
 
         // ARG_1_AND_2_ARE_WORDS
-        at += (flags & 0x0001) ? 4 : 2;
+        const std::size_t argsSize = (flags & 0x0001) ? 4 : 2;
+        std::size_t transformSize = 0;
         if (flags & 0x0008) {          // WE_HAVE_A_SCALE
-            at += 2;
+            transformSize = 2;
         } else if (flags & 0x0040) {   // WE_HAVE_AN_X_AND_Y_SCALE
-            at += 4;
+            transformSize = 4;
         } else if (flags & 0x0080) {   // WE_HAVE_A_TWO_BY_TWO
-            at += 8;
+            transformSize = 8;
         }
+        // 明確驗證「引數 + 變換矩陣」整段都落在範圍內才前進，不要留到下一輪
+        // 迴圈開頭才發現——那時 at 已經帶著推算出來的位移去讀下一個
+        // component，即使 readU16/readS16 本身不會越界讀，邏輯上也已經不清楚
+        // 這個位移是不是還有意義。
+        if (at + argsSize + transformSize > glyphOffset + glyphLength) return;
+        at += argsSize + transformSize;
         if ((flags & 0x0020) == 0) break;  // MORE_COMPONENTS
     }
 }
@@ -362,12 +374,18 @@ SubsetResult subsetTrueType(const std::string& fontBytes, const std::set<char32_
     });
 
     const auto count = static_cast<std::uint16_t>(outputs.size());
-    std::uint16_t searchRange = 16;
+    // 用 32 位元算 searchRange：16 位元版本在 searchRange 達到 32768 時
+    // 乘二會截斷成 0，讓下面的迴圈條件永遠成立，成為無窮迴圈。表數量在這裡
+    // 固定不超過 10（見上方 outputs 的建構），不會真的觸發，但迴圈本身的
+    // 邏輯就是錯的，值得直接修掉而不是靠呼叫端的巧合來保命。
+    std::uint32_t searchRange32 = 16;
     std::uint16_t entrySelector = 0;
-    while (static_cast<std::uint32_t>(searchRange) * 2 <= static_cast<std::uint32_t>(count) * 16) {
-        searchRange = static_cast<std::uint16_t>(searchRange * 2);
+    while (searchRange32 < 0x8000u &&
+           searchRange32 * 2 <= static_cast<std::uint32_t>(count) * 16) {
+        searchRange32 *= 2;
         ++entrySelector;
     }
+    const std::uint16_t searchRange = static_cast<std::uint16_t>(searchRange32);
 
     std::string out;
     appendU32(out, 0x00010000u);

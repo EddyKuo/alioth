@@ -9,6 +9,7 @@
 #include <openssl/objects.h>
 #include <openssl/x509.h>
 
+#include <climits>
 #include <cstdio>
 #include <ctime>
 #include <functional>
@@ -196,6 +197,14 @@ using TimestampEmbedFn =
         return false;
     }
 
+    // CMS_unsigned_add1_attr_by_NID 只收 int 長度。靜默轉型截斷會讓屬性只掛上
+    // 時間戳的前半段，之後任何驗證端解析這個 attribute 都會失敗，且看起來像
+    // 「沒有時間戳」而不是「時間戳寫壞了」——必須在轉型前明確拒絕。
+    if (tokenDer.size() > static_cast<std::size_t>(INT_MAX)) {
+        diagnostic = "時間戳權杖大小超出可嵌入上限";
+        return false;
+    }
+
     if (CMS_unsigned_add1_attr_by_NID(signerInfo, NID_id_smime_aa_timeStampToken, V_ASN1_SEQUENCE,
                                       tokenDer.data(), static_cast<int>(tokenDer.size())) <= 0) {
         ERR_clear_error();
@@ -262,6 +271,15 @@ using TimestampEmbedFn =
     if (attrAdded <= 0) {
         diagnostic = "掛上 ESS signingCertificateV2 屬性失敗";
         ERR_clear_error();
+        CMS_ContentInfo_free(cms);
+        return out;
+    }
+
+    // BIO_new_mem_buf 只收 int 長度。靜默轉型截斷會讓 CMS_final 只對前面一段
+    // 資料算摘要並簽章——簽章看起來成功，但只涵蓋檔案的一部分，之後拿完整
+    // 檔案去驗證會摘要不符。必須在轉型前明確拒絕，不能讓半份簽章冒充完整簽章。
+    if (data.size() > static_cast<std::size_t>(INT_MAX)) {
+        diagnostic = "待簽署資料大小超出可簽署上限";
         CMS_ContentInfo_free(cms);
         return out;
     }

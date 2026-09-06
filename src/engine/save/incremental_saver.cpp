@@ -328,16 +328,19 @@ void ScopedDocument::close() {
 }
 
 int ScopedDocument::pageCount() const {
+    const PdfiumGuard guard;  // 行程級序列化（ADR-005）：公開方法不能假設呼叫端已持鎖。
     return document_ ? FPDF_GetPageCount(toDocument(document_)) : 0;
 }
 
 int ScopedDocument::fileVersion() const {
+    const PdfiumGuard guard;  // 行程級序列化（ADR-005）：公開方法不能假設呼叫端已持鎖。
     if (!document_) return 0;
     int version = 0;
     return FPDF_GetFileVersion(toDocument(document_), &version) ? version : 0;
 }
 
 int ScopedDocument::signatureCount() const {
+    const PdfiumGuard guard;  // 行程級序列化（ADR-005）：公開方法不能假設呼叫端已持鎖。
     return document_ ? FPDF_GetSignatureCount(toDocument(document_)) : 0;
 }
 

@@ -133,6 +133,8 @@ endif()
 # 連結需要引擎與應用層。
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::engine Alioth::app)
 alioth_add_test(test_links test_links.cpp)
+alioth_add_test(test_page_geometry test_page_geometry.cpp)
+set_property(TEST test_page_geometry APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 alioth_add_test(test_outline_traversal test_outline_traversal.cpp)
 set_property(TEST test_outline_traversal APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_property(TEST test_links APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

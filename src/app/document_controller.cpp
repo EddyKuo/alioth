@@ -20,6 +20,13 @@ namespace {
 // 可視區外要預取的圖磚圈數。1 圈足以蓋掉一般捲動速度，再多只是浪費渲染預算。
 constexpr std::int32_t kPrefetchRings = 1;
 
+// 開檔時先問幾頁的真實尺寸。其餘依可視區按需補（ensurePageGeometry）。
+constexpr std::int32_t kInitialGeometryPages = 32;
+
+// 可視頁前後各多問幾頁。等頁面捲進來才問，使用者會看到版面從 A4 佔位
+// 跳成真實尺寸——那個跳動比多花一點時間載入更明顯。
+constexpr std::int32_t kGeometryLookahead = 8;
+
 }  // namespace
 
 DocumentController::DocumentController(QObject* parent)
@@ -49,8 +56,10 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
     viewportGeneration_.cancelAll();
     viewportGeneration_.reset();
     ++renderGeneration_;
+    ++documentGeneration_;
     cache_.clear();
     pageSizes_.clear();
+    geometryRequested_.clear();
     open_ = false;
 
     engine_->openDocument(
@@ -67,6 +76,7 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
                     info_ = result.info;
                     open_ = true;
                     pageSizes_.assign(static_cast<std::size_t>(info_.pageCount), domain::SizeF{});
+                    geometryRequested_.assign(static_cast<std::size_t>(info_.pageCount), char{0});
                     loadPageGeometry();
                     emit documentOpened(path);
                     requestOutline();
@@ -78,8 +88,10 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
 void DocumentController::closeDocument() {
     viewportGeneration_.cancelAll();
     ++renderGeneration_;
+    ++documentGeneration_;
     cache_.clear();
     pageSizes_.clear();
+    geometryRequested_.clear();
     outline_.clear();
     annotations_.clear();
     links_.clear();
@@ -94,24 +106,45 @@ void DocumentController::closeDocument() {
 }
 
 void DocumentController::loadPageGeometry() {
-    // 只先問前幾頁：版面計算需要真實尺寸，但一次問一萬頁會塞爆佇列。
-    // 其餘頁面在捲動接近時才補（TODO WBS 2.3 頁面生命週期）。
-    const std::int32_t probe = std::min<std::int32_t>(info_.pageCount, 32);
-    for (std::int32_t i = 0; i < probe; ++i) {
-        engine_->pageInfo(i, [this, i](std::optional<domain::PageInfo> info) {
+    // 只先問前幾頁：版面計算需要真實尺寸，但一次問一萬頁會塞爆那條唯一的
+    // PDFium 執行緒。其餘頁面由 scheduleTiles 依可視區按需補。
+    ensurePageGeometry(0, kInitialGeometryPages - 1);
+}
+
+void DocumentController::ensurePageGeometry(std::int32_t fromPage, std::int32_t toPage) {
+    const auto count = static_cast<std::int32_t>(pageSizes_.size());
+    if (count == 0) return;
+
+    const std::int32_t first = std::max(0, fromPage);
+    const std::int32_t last = std::min(count - 1, toPage);
+    const std::uint64_t generation = documentGeneration_;
+
+    for (std::int32_t i = first; i <= last; ++i) {
+        if (geometryRequested_[static_cast<std::size_t>(i)] != 0) continue;
+        geometryRequested_[static_cast<std::size_t>(i)] = 1;
+        engine_->pageInfo(i, [this, i, generation](std::optional<domain::PageInfo> info) {
             if (!info) return;
             const domain::SizeF size = info->sizePt;
             QMetaObject::invokeMethod(
                 this,
-                [this, i, size] {
-                    if (i < static_cast<std::int32_t>(pageSizes_.size())) {
-                        pageSizes_[static_cast<std::size_t>(i)] = size;
-                        emit pageGeometryChanged();
-                    }
+                [this, i, generation, size] {
+                    // 換過文件之後，前一份文件還在路上的尺寸不可以寫進來：
+                    // 頁碼同樣合法，寫進去不會有任何錯誤，只會讓新文件的
+                    // 某幾頁沿用舊文件的紙張尺寸。
+                    if (generation != documentGeneration_) return;
+                    if (i >= static_cast<std::int32_t>(pageSizes_.size())) return;
+                    if (pageSizes_[static_cast<std::size_t>(i)] == size) return;
+                    pageSizes_[static_cast<std::size_t>(i)] = size;
+                    emit pageGeometryChanged();
                 },
                 Qt::QueuedConnection);
         });
     }
+}
+
+bool DocumentController::pageGeometryKnown(std::int32_t index) const {
+    if (index < 0 || index >= static_cast<std::int32_t>(pageSizes_.size())) return false;
+    return !pageSizes_[static_cast<std::size_t>(index)].isEmpty();
 }
 
 domain::SizeF DocumentController::pageSizePt(std::int32_t index) const {
@@ -120,12 +153,26 @@ domain::SizeF DocumentController::pageSizePt(std::int32_t index) const {
     }
     const domain::SizeF size = pageSizes_[static_cast<std::size_t>(index)];
     // 尚未問到真實尺寸前先用 A4，避免版面在載入瞬間塌成 0 高度。
+    // 這是佔位值不是答案：要區分兩者用 pageGeometryKnown()。
     return size.isEmpty() ? domain::SizeF{595.0, 842.0} : size;
 }
 
 void DocumentController::scheduleTiles(const std::vector<PageTileRequest>& pages,
                                        const TileScheduleOptions& options) {
     if (!open_) return;
+
+    // 補載真實頁面尺寸。不補的話開檔時問到的那幾頁之後全部永久沿用 A4 佔位，
+    // 而 Letter、A3、橫向或混合尺寸的文件會因此排錯頁面間距、捲動位置、
+    // 命中座標與圖磚邊界——畫面上看起來只是「排得有點鬆」，不會有錯誤訊息。
+    if (!pages.empty()) {
+        std::int32_t first = pages.front().pageIndex;
+        std::int32_t last = first;
+        for (const PageTileRequest& page : pages) {
+            first = std::min(first, page.pageIndex);
+            last = std::max(last, page.pageIndex);
+        }
+        ensurePageGeometry(first - kGeometryLookahead, last + kGeometryLookahead);
+    }
 
     const bool zoomChanged = std::abs(options.scale - lastOptions_.scale) > 1e-9;
     const bool rotationChanged = options.rotation != lastOptions_.rotation;

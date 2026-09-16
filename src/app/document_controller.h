@@ -67,6 +67,14 @@ public:
     [[nodiscard]] const domain::DocumentInfo& info() const noexcept { return info_; }
     [[nodiscard]] std::int32_t pageCount() const noexcept { return info_.pageCount; }
     [[nodiscard]] domain::SizeF pageSizePt(std::int32_t index) const;
+    // 真實尺寸是否已經問到。false 代表 pageSizePt() 現在回的是 A4 佔位值，
+    // 呼叫端若要做「對齊實際紙張」之類的決定，必須先等它變 true。
+    [[nodiscard]] bool pageGeometryKnown(std::int32_t index) const;
+
+    // 按需補載頁面尺寸。開檔時只先問前 kInitialGeometryPages 頁——一次問一萬頁
+    // 會塞爆那條唯一的 PDFium 執行緒，而版面只需要看得到的那幾頁。
+    // 範圍會自行裁到合法頁碼，已問過的頁不會重複送出。
+    void ensurePageGeometry(std::int32_t fromPage, std::int32_t toPage);
 
     // 排程渲染。呼叫端（呈現層）算好哪些頁的哪些範圍看得到，控制器不反推版面。
     // 每次呼叫都會取消上一批尚未開始的預取任務。
@@ -160,8 +168,15 @@ private:
     engine::RenderOptions renderOptions_{};
     std::uint64_t renderGeneration_{0};  // Accessed only on the controller's thread.
 
+    // 換文件時遞增。圖磚用 renderGeneration_（顯示選項一改也要作廢），
+    // 頁面幾何只在換文件時作廢——夜間模式不會讓 A4 變成 A3。
+    std::uint64_t documentGeneration_{0};
+
     domain::DocumentInfo info_{};
     std::vector<domain::SizeF> pageSizes_;
+    // 已送出 pageInfo 請求的頁。沒有這張表的話，每次捲動都會對同一批頁面
+    // 重送請求，而那條 PDFium 執行緒是全行程唯一的一條。
+    std::vector<char> geometryRequested_;
     engine::save::AutosaveManager autosave_;
     class QTimer* autosaveTimer_{nullptr};
     TileScheduleOptions lastOptions_{};

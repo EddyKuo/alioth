@@ -207,6 +207,11 @@ struct Task {
     std::function<void()> run;
     CancellationToken token{};
     std::function<void()> onCancelled;
+    // 可視區一變就丟掉的工作。圖磚是（算到一半的舊可視區沒有價值），
+    // 但頁面幾何這類「版面賴以成立的中繼資料」不是：丟掉它不會有錯誤訊息，
+    // 只會讓那幾頁永遠停在佔位尺寸。同理，同步等待結果的呼叫端（列印）
+    // 一旦工作被丟掉就會永遠等下去。
+    bool discardable{true};
 };
 
 struct PdfiumEngine::Impl {
@@ -227,7 +232,7 @@ struct PdfiumEngine::Impl {
     domain::DocumentInfo info{};
 
     void enqueue(TaskPriority priority, CancellationToken token, std::function<void()> run,
-                 std::function<void()> onCancelled = {}) {
+                 std::function<void()> onCancelled = {}, bool discardable = true) {
         {
             std::lock_guard lock(mutex);
             if (!running) return;
@@ -237,6 +242,7 @@ struct PdfiumEngine::Impl {
             task.run = std::move(run);
             task.token = std::move(token);
             task.onCancelled = std::move(onCancelled);
+            task.discardable = discardable;
             // 優先權排序：可見圖磚 > 預取 > 縮圖；同權時依序號維持 FIFO。
             const auto pos = std::upper_bound(
                 queue.begin(), queue.end(), task, [](const Task& a, const Task& b) {
@@ -507,6 +513,11 @@ void PdfiumEngine::renderTile(domain::TileKey key, RenderOptions options, TaskPr
         std::move(cancelled));
 }
 
+// 頁面幾何刻意不可丟棄（Task::discardable）。它跑在 Background，而
+// scheduleTiles 每次可視區變動都會 discardPending(Prefetch)——那個條件是
+// 「優先權數值 >= Prefetch」，Background 數值更大，所以一併中彈。
+// 後果有兩個，都不會有錯誤訊息：版面永遠停在 A4 佔位尺寸，以及同步等待
+// 結果的列印路徑（print_service）永遠等不到 promise。
 void PdfiumEngine::pageInfo(std::int32_t pageIndex,
                             std::function<void(std::optional<domain::PageInfo>)> callback) {
     impl_->enqueue(TaskPriority::Background, CancellationToken{},
@@ -521,7 +532,7 @@ void PdfiumEngine::pageInfo(std::int32_t pageIndex,
         info.sizePt = {FPDF_GetPageWidthF(page), FPDF_GetPageHeightF(page)};
         info.intrinsicRotation = static_cast<domain::Rotation>(FPDFPage_GetRotation(page) & 0x3);
         if (callback) callback(info);
-    });
+    }, {}, /*discardable=*/false);
 }
 
 
@@ -787,7 +798,7 @@ void PdfiumEngine::discardPending(TaskPriority atOrBelow) {
     {
         std::lock_guard lock(impl_->mutex);
         for (auto it = impl_->queue.begin(); it != impl_->queue.end();) {
-            if (it->priority >= atOrBelow) {
+            if (it->priority >= atOrBelow && it->discardable) {
                 dropped.push_back(std::move(*it));
                 it = impl_->queue.erase(it);
             } else {

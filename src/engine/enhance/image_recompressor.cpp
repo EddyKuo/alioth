@@ -88,23 +88,6 @@ struct ImageInfo {
     return unsupported;
 }
 
-// 把 /SMask 併回 alpha 通道。這一步是「遮罩要一起處理」的實作核心：
-// 併回來之後，重編碼的輸出會自己帶出一份尺寸必然正確的新 /SMask。
-void applySoftMask(PixelBuffer& pixels, const PixelBuffer& mask) {
-    if (mask.isNull() || pixels.isNull()) return;
-    const PixelBuffer sized = (mask.width() == pixels.width() && mask.height() == pixels.height())
-                                  ? clonePixels(mask)
-                                  : resample(mask, pixels.width(), pixels.height());
-    if (sized.isNull()) return;
-    for (std::int32_t y = 0; y < pixels.height(); ++y) {
-        std::uint8_t* row = pixels.scanline(y);
-        const std::uint8_t* maskRow = sized.data() + sized.stride() * static_cast<std::size_t>(y);
-        for (std::int32_t x = 0; x < pixels.width(); ++x) {
-            row[x * 4 + 3] = maskRow[x * 4 + 0];
-        }
-    }
-}
-
 }  // namespace
 
 RecompressResult recompressImages(objects::IncrementalAppender& appender,
@@ -165,7 +148,11 @@ RecompressResult recompressImages(objects::IncrementalAppender& appender,
                 result.images.push_back(report);
                 continue;
             }
-            if (info.colourKeyMask) {
+            // These sample interpretations are not implemented by decodeRawSamples.
+            // Replacing their dictionary would silently change the rendered image.
+            if (info.colourKeyMask || stream->dict.find("Decode") != nullptr ||
+                stream->dict.find("ImageMask") != nullptr ||
+                stream->dict.find("SMaskInData") != nullptr) {
                 report.decision = RecompressDecision::SkippedUnsupported;
                 result.images.push_back(report);
                 continue;
@@ -181,24 +168,9 @@ RecompressResult recompressImages(objects::IncrementalAppender& appender,
                 continue;
             }
 
-            // /SMask 的位元組也算進「原本佔多少」，否則替換之後總量看起來變大，
-            // 而使用者看到的是檔案變小——兩個數字對不起來就沒有人會相信報告。
-            int softMaskObject = 0;
-            if (settings.includeMasks) {
-                if (const PdfObject* smask = stream->dict.find("SMask");
-                    smask != nullptr && smask->isRef()) {
-                    softMaskObject = smask->asRef().number;
-                    const PdfObject maskObject = source.object(softMaskObject);
-                    if (const PdfStream* maskStream = maskObject.asStream(); maskStream != nullptr) {
-                        report.originalBytes += static_cast<std::int64_t>(maskStream->data.size());
-                        ImageInfo maskInfo;
-                        if (readImageInfo(source, maskStream->dict, maskInfo)) {
-                            const DecodedImage mask = decodeImageObject(source, *maskStream, maskInfo);
-                            if (mask.ok) applySoftMask(decoded.pixels, mask.pixels);
-                        }
-                    }
-                }
-            }
+            // Dimensions do not change in this operation. Keep masks verbatim:
+            // decoding failure must never make an image opaque, and masks can
+            // be shared with images on pages outside the requested range.
 
             PixelBuffer pixels = std::move(decoded.pixels);
             const EncodedImage encoded = encodeImage(pixels, settings.compression);
@@ -218,32 +190,15 @@ RecompressResult recompressImages(objects::IncrementalAppender& appender,
 
             // 就地覆寫影像物件：資源名稱與所有引用都不需要改，
             // 被多頁共用的影像也因此一次到位。
-            int newMaskObject = 0;
-            if (!encoded.softMaskData.empty()) {
-                PdfStream mask;
-                mask.dict.set("Type", objects::makeName("XObject"));
-                mask.dict.set("Subtype", objects::makeName("Image"));
-                mask.dict.set("Width", PdfObject{static_cast<std::int64_t>(encoded.width)});
-                mask.dict.set("Height", PdfObject{static_cast<std::int64_t>(encoded.height)});
-                mask.dict.set("ColorSpace", objects::makeName("DeviceGray"));
-                mask.dict.set("BitsPerComponent", PdfObject{static_cast<std::int64_t>(8)});
-                mask.dict.set("Filter", objects::makeName("FlateDecode"));
-                mask.data = encoded.softMaskData;
-
-                if (softMaskObject > 0) {
-                    newMaskObject = softMaskObject;
-                    if (!appender.updateObject(softMaskObject, PdfObject{std::move(mask)})) {
-                        report.decision = RecompressDecision::Failed;
-                        result.images.push_back(report);
-                        continue;
-                    }
-                } else {
-                    newMaskObject = appender.allocateObject();
-                    appender.setObject(newMaskObject, PdfObject{std::move(mask)});
+            PdfObject replacement = makeImageStream(encoded);
+            // Preserve rendering metadata as well as both forms of masks.
+            for (const char* key : {"SMask", "Mask", "Interpolate", "Intent", "OC",
+                                    "StructParent", "Metadata"}) {
+                if (const PdfObject* entry = stream->dict.find(key)) {
+                    replacement.asStream()->dict.set(key, *entry);
                 }
             }
-
-            if (!appender.updateObject(objectNumber, makeImageStream(encoded, newMaskObject))) {
+            if (!appender.updateObject(objectNumber, std::move(replacement))) {
                 report.decision = RecompressDecision::Failed;
                 result.images.push_back(report);
                 continue;

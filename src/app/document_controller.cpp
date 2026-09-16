@@ -48,6 +48,7 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
     path_ = path;
     viewportGeneration_.cancelAll();
     viewportGeneration_.reset();
+    ++renderGeneration_;
     cache_.clear();
     pageSizes_.clear();
     open_ = false;
@@ -76,6 +77,7 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
 
 void DocumentController::closeDocument() {
     viewportGeneration_.cancelAll();
+    ++renderGeneration_;
     cache_.clear();
     pageSizes_.clear();
     outline_.clear();
@@ -189,11 +191,16 @@ void DocumentController::requestTile(const domain::TileKey& key, domain::TaskPri
                                                 ? engine::CancellationToken{}
                                                 : viewportGeneration_.token();
 
-    engine_->renderTile(key, renderOptions_, priority, token, [this](engine::RenderResult result) {
+    const auto generation = renderGeneration_;
+    engine_->renderTile(key, renderOptions_, priority, token, [this, generation](engine::RenderResult result) {
         if (!result.ok()) return;
-        cache_.insert(result.key, result.buffer);
-        const domain::TileKey key = result.key;
-        QMetaObject::invokeMethod(this, [this, key] { emit tileReady(key); }, Qt::QueuedConnection);
+        QMetaObject::invokeMethod(this, [this, generation, result = std::move(result)] {
+            // Old queued renders must not repopulate a cache cleared for a new
+            // document or display option. Check and insert on the same thread.
+            if (generation != renderGeneration_) return;
+            cache_.insert(result.key, result.buffer);
+            emit tileReady(result.key);
+        }, Qt::QueuedConnection);
     });
 }
 
@@ -384,6 +391,7 @@ void DocumentController::setAutosaveSeconds(int seconds) {
 void DocumentController::setNightMode(bool enabled) {
     if (renderOptions_.nightMode == enabled) return;
     renderOptions_.nightMode = enabled;
+    ++renderGeneration_;
     cache_.clear();  // 夜間模式是圖磚鍵的一部分，舊圖磚全部作廢
     // 重新排程由呈現層負責：只有它知道現在看得到哪些頁。
     emit pageGeometryChanged();
@@ -398,6 +406,7 @@ void DocumentController::setCustomColors(bool enabled, const QColor& background,
     renderOptions_.textR = static_cast<std::uint8_t>(text.red());
     renderOptions_.textG = static_cast<std::uint8_t>(text.green());
     renderOptions_.textB = static_cast<std::uint8_t>(text.blue());
+    ++renderGeneration_;
     // 顏色不是圖磚鍵的一部分（那會讓每換一次配色就多一整份快取），
     // 因此必須手動清掉：不清的話換了顏色仍然顯示舊配色的圖磚。
     cache_.clear();
@@ -407,8 +416,22 @@ void DocumentController::setCustomColors(bool enabled, const QColor& background,
 void DocumentController::setTransparencyGrid(bool enabled) {
     if (renderOptions_.transparencyGrid == enabled) return;
     renderOptions_.transparencyGrid = enabled;
+    ++renderGeneration_;
     // 與夜間模式不同，這個選項不是圖磚鍵的一部分（見標頭的說明），
     // 所以一定要手動清快取，否則切換前用不透明白底烘出來的舊圖磚會繼續顯示。
+    cache_.clear();
+    emit pageGeometryChanged();
+}
+
+void DocumentController::setRenderQuality(bool grayscale, bool smoothPaths,
+                                          bool smoothText, bool smoothImages) {
+    if (renderOptions_.grayscale == grayscale && renderOptions_.strokeAdjust == !smoothPaths &&
+        renderOptions_.smoothText == smoothText && renderOptions_.smoothImages == smoothImages) return;
+    renderOptions_.grayscale = grayscale;
+    renderOptions_.strokeAdjust = !smoothPaths;
+    renderOptions_.smoothText = smoothText;
+    renderOptions_.smoothImages = smoothImages;
+    ++renderGeneration_;
     cache_.clear();
     emit pageGeometryChanged();
 }

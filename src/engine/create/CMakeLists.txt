@@ -29,7 +29,7 @@ add_library(alioth_create STATIC
 
 target_link_libraries(alioth_create
     PUBLIC Alioth::domain Alioth::objects
-    PRIVATE Qt6::Core
+    PRIVATE Qt6::Core Alioth::fonts
 )
 
 add_library(Alioth::create ALIAS alioth_create)

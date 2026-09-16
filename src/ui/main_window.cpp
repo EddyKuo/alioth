@@ -1283,6 +1283,30 @@ void MainWindow::buildActions() {
     connect(nightAction, &QAction::toggled, this,
             [this](bool on) { controller_->setNightMode(on); });
 
+    auto* qualityMenu = viewMenu->addMenu(tr("顯示品質"));
+    auto* grayAction = qualityMenu->addAction(tr("灰階預覽"));
+    auto* pathsAction = qualityMenu->addAction(tr("平滑線條"));
+    auto* textAction = qualityMenu->addAction(tr("平滑文字"));
+    auto* imagesAction = qualityMenu->addAction(tr("平滑影像"));
+    const auto& quality = controller_->renderOptions();
+    const QList<QAction*> qualityActions{grayAction, pathsAction, textAction, imagesAction};
+    for (auto* action : qualityActions) action->setCheckable(true);
+    grayAction->setChecked(quality.grayscale);
+    pathsAction->setChecked(!quality.strokeAdjust);
+    textAction->setChecked(quality.smoothText);
+    imagesAction->setChecked(quality.smoothImages);
+    registerRibbonAction(QStringLiteral("view.grayscale"), grayAction);
+    registerRibbonAction(QStringLiteral("view.smoothPaths"), pathsAction);
+    registerRibbonAction(QStringLiteral("view.smoothText"), textAction);
+    registerRibbonAction(QStringLiteral("view.smoothImages"), imagesAction);
+    for (auto* action : qualityActions) {
+        connect(action, &QAction::toggled, this,
+                [this, grayAction, pathsAction, textAction, imagesAction] {
+            controller_->setRenderQuality(grayAction->isChecked(), pathsAction->isChecked(),
+                                           textAction->isChecked(), imagesAction->isChecked());
+        });
+    }
+
     // PRD-VIEW-018：透明度格線。純檢視選項，不改文件——關掉之後畫面應該
     // 跟從沒開過一樣，這是它跟夜間模式（會反轉實際渲染出來的像素）唯一
     // 不同但同樣重要的地方。

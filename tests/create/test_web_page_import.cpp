@@ -14,6 +14,7 @@
 #include "create_test_support.h"
 #include "domain/document_source.h"
 #include "engine/create/web_page_to_pdf.h"
+#include "engine/fonts/cjk_font_library.h"
 
 using namespace alioth::domain::create;
 using namespace alioth::engine::create;
@@ -117,14 +118,28 @@ private slots:
         ALIOTH_REQUIRE_QPDF_CLEAN(path, QStringLiteral("網頁匯入"));
     }
 
-    void nonAsciiHtmlContentFailsAtTextLayoutStage() {
-        // 中文內容會通過 HTML 擷取（擷取本身不檢查 ASCII），但送進純文字排版
-        // 時必須明確失敗——這是既有 ASCII-only 政策的延伸，不是這支功能
-        // 自己的規則。
+    void nonAsciiHtmlContentEmbedsCjkFont() {
+        // 中文內容通過 HTML 擷取後，交給純文字排版走內嵌子集（ADR-007）。
+        // 這不是這支功能自己的規則，而是跟著 createPdfFromPlainText 走——
+        // 網頁匯入不該有一套自己的字型政策。
         const std::string html = "<html><body><p>\xE4\xB8\xAD\xE6\x96\x87\xE5\x85\xA7\xE5\xAE\xB9</p></body></html>";
         WebPageToPdfConverter converter(constantFetcher(htmlResponse(html)));
         const WebPageImportResult result = converter.convert("https://example.invalid/cjk.html");
-        QVERIFY(!result.ok);
+
+        if (!alioth::engine::fonts::CjkFontLibrary::instance().available()) {
+            // 字型不在時必須明確失敗，不可退回拉丁字型畫出一排空框。
+            QVERIFY(!result.ok);
+            return;
+        }
+
+        QVERIFY2(result.ok, result.diagnostic.c_str());
+        QVERIFY(result.bytes.find("/CJK") != std::string::npos);
+
+        const QString path = alioth::test::create::writeBytes(
+            dir_->path(), QStringLiteral("webpage_cjk.pdf"), result.bytes);
+        const auto opened = alioth::test::create::openWithPdfium(path);
+        QVERIFY2(opened.ok, opened.detail.toUtf8().constData());
+        ALIOTH_REQUIRE_QPDF_CLEAN(path, QStringLiteral("含 CJK 的網頁匯入"));
     }
 
 private:

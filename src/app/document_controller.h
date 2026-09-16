@@ -112,6 +112,8 @@ public:
     void setAutosaveSeconds(int seconds);
 
     void setNightMode(bool enabled);
+    void setRenderQuality(bool grayscale, bool smoothPaths, bool smoothText, bool smoothImages);
+    [[nodiscard]] const engine::RenderOptions& renderOptions() const noexcept { return renderOptions_; }
     // 自訂背景與文字色（PRD-VIEW-007）。與夜間模式互斥，夜間模式優先。
     void setCustomColors(bool enabled, const QColor& background, const QColor& text);
     [[nodiscard]] bool nightMode() const noexcept { return renderOptions_.nightMode; }
@@ -156,6 +158,7 @@ private:
     engine::TileCache cache_;
     engine::CancellationSource viewportGeneration_;
     engine::RenderOptions renderOptions_{};
+    std::uint64_t renderGeneration_{0};  // Accessed only on the controller's thread.
 
     domain::DocumentInfo info_{};
     std::vector<domain::SizeF> pageSizes_;

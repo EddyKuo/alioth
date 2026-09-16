@@ -496,6 +496,44 @@ inline std::vector<std::string> splitLines(std::string_view text) {
     return blocks;
 }
 
+// 版心高度能放幾行。分頁與斷行必須看同一個數字，分別各算一次就會在
+// 某些行距下差一行，而症狀是最後一頁莫名多出或少掉一行。
+[[nodiscard]] inline std::size_t linesPerPage(const TextLayout& layout) noexcept {
+    const double contentHeight = layout.pageHeightPt - layout.leftX * 2.0;
+    return static_cast<std::size_t>(std::max(1.0, std::floor(contentHeight / layout.leading)));
+}
+
+// 分頁骨架：\f 分段、段內逐行斷行、修剪尾端空行、依版心高度切頁。
+//
+// 斷行方式由呼叫端給（ASCII 走標準 14 字型的字寬表，含 CJK 的輸入走內嵌
+// 字型的字寬），但「一段文字怎麼變成幾頁」只有這一份實作。兩份的代價是
+// 往後任何一次調整邊距、行距或尾端空行規則，都必須記得同時改另一邊，
+// 而漏掉的症狀是 ASCII 與 CJK 的同一份文件分頁不一樣。
+//
+// wrapLine 回傳 false 代表這一行排不下（例如版心容不下單一字形），
+// 整個版面隨即放棄，診斷由呼叫端自己填。
+template <typename WrapLine>
+[[nodiscard]] inline bool paginate(std::string_view text, std::size_t perPage,
+                                   std::vector<std::vector<std::string>>& pages,
+                                   WrapLine wrapLine) {
+    for (const std::string_view block : splitFormFeed(text)) {
+        std::vector<std::string> allLines;
+        for (const std::string& raw : splitLines(block)) {
+            if (!wrapLine(raw, allLines)) return false;
+        }
+        // 尾端的空行不值得多印一頁。
+        while (allLines.size() > 1 && allLines.back().empty()) allLines.pop_back();
+
+        for (std::size_t i = 0; i < allLines.size(); i += perPage) {
+            const std::size_t end = std::min(allLines.size(), i + perPage);
+            pages.emplace_back(allLines.begin() + static_cast<std::ptrdiff_t>(i),
+                               allLines.begin() + static_cast<std::ptrdiff_t>(end));
+        }
+    }
+    if (pages.empty()) pages.emplace_back();
+    return true;
+}
+
 }  // namespace detail
 
 [[nodiscard]] inline TextLayout layoutPlainText(std::string_view text,
@@ -527,27 +565,15 @@ inline std::vector<std::string> splitLines(std::string_view text) {
     // 0.75 em 是標準 14 字型 ascender 的保守值。
     layout.firstBaselineY = paper.heightPt - margin - fontSize * 0.75;
 
-    const auto linesPerPage =
-        static_cast<std::size_t>(std::max(1.0, std::floor(contentHeight / layout.leading)));
-
     // \f 分段：每一段各自從新的一頁開始，段內再依版心高度自動分頁。
     // 沒有 \f 的輸入只有一段，行為與先前完全相同。
-    for (const std::string_view block : detail::splitFormFeed(text)) {
-        std::vector<std::string> allLines;
-        for (const std::string& raw : detail::splitLines(block)) {
-            detail::wrapParagraph(detail::expandTabs(raw, options.tabWidth), layout.font, fontSize,
-                                  contentWidth, allLines);
-        }
-        // 尾端的空行不值得多印一頁。
-        while (allLines.size() > 1 && allLines.back().empty()) allLines.pop_back();
-
-        for (std::size_t i = 0; i < allLines.size(); i += linesPerPage) {
-            const std::size_t end = std::min(allLines.size(), i + linesPerPage);
-            layout.pages.emplace_back(allLines.begin() + static_cast<std::ptrdiff_t>(i),
-                                      allLines.begin() + static_cast<std::ptrdiff_t>(end));
-        }
-    }
-    if (layout.pages.empty()) layout.pages.emplace_back();
+    // ASCII 的斷行不會失敗（放不下的字改成逐字元硬切），回傳值恆為 true。
+    (void)detail::paginate(text, detail::linesPerPage(layout), layout.pages,
+                     [&](const std::string& raw, std::vector<std::string>& out) {
+                         detail::wrapParagraph(detail::expandTabs(raw, options.tabWidth),
+                                               layout.font, fontSize, contentWidth, out);
+                         return true;
+                     });
 
     layout.ok = true;
     return layout;

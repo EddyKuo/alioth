@@ -268,6 +268,46 @@ private slots:
                  output.resolve(*dict->find("Height")).asInteger());
     }
 
+    void preservesMaskBytes_data() {
+        QTest::addColumn<bool>("damagedMask");
+        QTest::newRow("intact-mask") << false;
+        // 解不開的遮罩最危險：一旦被當成「沒有遮罩」而略過，替換後的影像
+        // 就整片不透明，而那不會有任何錯誤訊息。
+        QTest::newRow("undecodable-mask") << true;
+    }
+
+    void preservesMaskBytes() {
+        QFETCH(bool, damagedMask);
+        auto pixels = gradientImage(160);
+        for (int y = 0; y < 160; ++y) {
+            for (int x = 0; x < 160; ++x) pixels.scanline(y)[x * 4 + 3] = 100;
+        }
+        EncodedImage image = encodeFlate(pixels);
+        QVERIFY(image.ok);
+        QVERIFY(!image.softMaskData.empty());
+        if (damagedMask) image.softMaskData = "not a valid Flate stream";
+        const std::string pdf = documentWithImages({{"Im0", image, true}});
+        engine::objects::IncrementalAppender appender;
+        QCOMPARE(appender.open(pdf), engine::objects::SourceStatus::Ok);
+        RecompressSettings settings;
+        settings.compression.codec = domain::enhance::ImageCodec::Jpeg;
+        settings.compression.jpegQuality = 40;
+        const auto result = recompressImages(appender, {}, settings);
+        QVERIFY(result.ok);
+        QCOMPARE(result.replacedCount(), std::size_t{1});
+        const auto built = appender.build();
+        QVERIFY(built.ok);
+        engine::objects::PdfSourceDocument output;
+        QCOMPARE(output.open(built.bytes), engine::objects::SourceStatus::Ok);
+        const auto replacement = output.object(result.images.front().objectNumber);
+        const auto* mask = replacement.asStream()->dict.find("SMask");
+        QVERIFY(mask != nullptr);
+        QCOMPARE(mask->asRef().number, 5);
+        QCOMPARE(streamDataOf(built.bytes, 5), image.softMaskData);
+        QCOMPARE(result.images.front().originalBytes,
+                 static_cast<std::int64_t>(image.data.size()));
+    }
+
     void tinyImagesAreSkipped() {
         const EncodedImage small = encodeFlate(gradientImage(16));
         QVERIFY(small.ok);

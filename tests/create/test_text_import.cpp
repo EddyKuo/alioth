@@ -12,6 +12,7 @@
 #include "create_test_support.h"
 #include "domain/document_source.h"
 #include "engine/create/text_to_pdf.h"
+#include "engine/fonts/cjk_font_library.h"
 
 using namespace alioth::domain::create;
 using namespace alioth::engine::create;
@@ -95,12 +96,49 @@ private slots:
         }
     }
 
-    // 非 ASCII 明確失敗，並指出是第幾個位元組。
-    void nonAsciiFailsExplicitly() {
-        const TextImportResult result = createPdfFromPlainText("hello \xE4\xB8\xAD\xE6\x96\x87");
+    // domain 的版面層只認 ASCII，並且要指出是第幾個位元組——那是使用者
+    // 唯一能自救的資訊。內嵌字型的路徑在引擎層，見下一個測試。
+    void asciiLayoutReportsOffendingByte() {
+        const TextLayout layout = layoutPlainText("hello \xE4\xB8\xAD\xE6\x96\x87");
+        QVERIFY(!layout.ok);
+        QVERIFY2(layout.diagnostic.find("第 6 個位元組") != std::string::npos,
+                 layout.diagnostic.c_str());
+    }
+
+    // 含 CJK 的輸入改走內嵌子集（ADR-007）。字型不在時仍必須明確失敗，
+    // 不可退回拉丁字型畫出一排空框。
+    void cjkTextEmbedsFontSubset() {
+        const std::string text = "hello \xE4\xB8\xAD\xE6\x96\x87";
+        const TextImportResult result = createPdfFromPlainText(text);
+
+        if (!alioth::engine::fonts::CjkFontLibrary::instance().available()) {
+            QVERIFY(!result.ok);
+            QVERIFY(result.bytes.empty());
+            QVERIFY2(result.diagnostic.find("內嵌字型缺少字形") != std::string::npos,
+                     result.diagnostic.c_str());
+            return;
+        }
+
+        QVERIFY2(result.ok, result.diagnostic.c_str());
+        QCOMPARE(result.pageCount, std::size_t{1});
+        // CJK 字元必須走 /CJK 這個資源。落回 /F0（WinAnsiEncoding）不會報錯，
+        // 只會畫出方框，而那在位元組層面看起來完全正常。
+        QVERIFY(result.bytes.find("/CJK") != std::string::npos);
+
+        const QString path = alioth::test::create::writeBytes(
+            dir_->path(), QStringLiteral("cjk.pdf"), result.bytes);
+        const auto opened = alioth::test::create::openWithPdfium(path);
+        QVERIFY2(opened.ok, opened.detail.toUtf8().constData());
+        QCOMPARE(opened.pageCount, 1);
+        ALIOTH_REQUIRE_QPDF_CLEAN(path, QStringLiteral("含 CJK 的純文字"));
+    }
+
+    // 壞掉的 UTF-8 不可以被 decoder 靜默補成替代字元後照樣輸出。
+    void invalidUtf8FailsExplicitly() {
+        const TextImportResult result = createPdfFromPlainText(std::string("hello \xFF\xFE"));
         QVERIFY(!result.ok);
         QVERIFY(result.nonAscii);
-        QVERIFY2(result.diagnostic.find("第 6 個位元組") != std::string::npos,
+        QVERIFY2(result.diagnostic.find("有效的 UTF-8") != std::string::npos,
                  result.diagnostic.c_str());
         QVERIFY(result.bytes.empty());
     }

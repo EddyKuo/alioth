@@ -121,6 +121,12 @@ enum class CellOrder : std::uint8_t {
 enum class CellFit : std::uint8_t {
     Contain,  // 等比縮放至完全放進格子，留白置中
     Stretch,  // 分別縮放兩軸填滿格子，會變形
+    // 完全不縮放，置中。用於「換紙張但不動內容尺寸」（PRD-PAGE-003）：
+    // A4 的圖面改放到 A3 上時，圖面本身的比例尺不可以跟著變——工程圖上
+    // 的 1:100 是標在紙上的事實，縮放過的圖再量就是錯的。
+    // 目標格子比內容小時內容會超出格線並被 MediaBox 裁掉，那是這個選項的
+    // 語意本身，呼叫端要先問過使用者。
+    None,
 };
 
 struct MergeLayout {
@@ -259,6 +265,9 @@ struct MergePlan {
             const double s = std::min(sx, sy);
             sx = s;
             sy = s;
+        } else if (layout.fit == CellFit::None) {
+            sx = 1.0;
+            sy = 1.0;
         }
         placement.scaleX = sx;
         placement.scaleY = sy;

@@ -2790,6 +2790,56 @@ void MainWindow::mergeDocuments() {
     statusBar()->showMessage(result.message, 8000);
 }
 
+void MainWindow::resizePagesWithDialog() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, tr("調整頁面尺寸"), tr("尚未開啟文件"));
+        return;
+    }
+
+    // 紙張清單刻意很短。要的是「換成常見紙張」這件事，而任意尺寸輸入框
+    // 會讓對話框多兩個欄位、多兩種錯誤輸入，卻服務不到多少人。
+    struct PaperChoice {
+        const char* label;
+        double widthPt;
+        double heightPt;
+    };
+    static const PaperChoice kChoices[] = {
+        {"A4（直向）", 595.276, 841.89},    {"A4（橫向）", 841.89, 595.276},
+        {"A3（直向）", 841.89, 1190.55},    {"A3（橫向）", 1190.55, 841.89},
+        {"Letter（直向）", 612.0, 792.0},   {"Letter（橫向）", 792.0, 612.0},
+    };
+
+    QStringList papers;
+    for (const PaperChoice& choice : kChoices) papers << tr(choice.label);
+
+    bool accepted = false;
+    const QString paper = QInputDialog::getItem(this, tr("調整頁面尺寸"), tr("目標紙張："),
+                                                papers, 0, false, &accepted);
+    if (!accepted || paper.isEmpty()) return;
+    const int paperIndex = papers.indexOf(paper);
+    if (paperIndex < 0) return;
+
+    // 縮放政策必須問，不能給預設值：兩種意思差別很大，而且從「調整頁面尺寸」
+    // 這個操作本身推斷不出來使用者要哪一種。工程圖選錯就是比例尺被改掉，
+    // 而那份圖之後還會被拿去量。
+    const QStringList policies{tr("內容跟著縮放（報告、文件）"),
+                               tr("內容維持原尺寸並置中（工程圖：比例尺不可變）")};
+    const QString policy = QInputDialog::getItem(this, tr("調整頁面尺寸"), tr("內容處理方式："),
+                                                 policies, 0, false, &accepted);
+    if (!accepted || policy.isEmpty()) return;
+    const bool keepContent = policies.indexOf(policy) == 1;
+
+    if (!confirmRewrite(tr("調整頁面尺寸"))) return;
+
+    const domain::SizeF target{kChoices[paperIndex].widthPt, kChoices[paperIndex].heightPt};
+    const auto chosen = keepContent ? engine::pageops::ResizePolicy::KeepContent
+                                    : engine::pageops::ResizePolicy::ScaleContent;
+    commitPageOperation(tr("調整頁面尺寸"), [this, target, chosen] {
+        return pageOps_->resizePages(currentPath_, {}, target, chosen,
+                                     app::RewriteConsent::confirmed());
+    });
+}
+
 void MainWindow::splitDocument() {
     if (currentPath_.isEmpty() || !controller_->isOpen()) {
         QMessageBox::information(this, tr("分割文件"), tr("尚未開啟文件"));
@@ -5177,6 +5227,12 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     auto* splitDocAction = menu->addAction(tr("分割文件..."));
     registerRibbonAction(QStringLiteral("document.split"), splitDocAction);
     connect(splitDocAction, &QAction::triggered, this, [this] { splitDocument(); });
+
+    // 頁面尺寸調整（PRD-PAGE-003）。縮放政策必須讓使用者選，不能給預設：
+    // 「改紙張大小」的兩種意思差很多，而且從操作本身推斷不出來。
+    auto* resizeAction = menu->addAction(tr("調整頁面尺寸..."));
+    registerRibbonAction(QStringLiteral("page.resize"), resizeAction);
+    connect(resizeAction, &QAction::triggered, this, [this] { resizePagesWithDialog(); });
 
     auto* cropAction = menu->addAction(tr("裁切至白邊"));
     registerRibbonAction(QStringLiteral("page.crop"), cropAction);

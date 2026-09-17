@@ -242,6 +242,137 @@ private slots:
                  PageOpsStatus::PageOutOfRange);
     }
 
+    // 頁面尺寸調整（PRD-PAGE-003）。
+    //
+    // 兩種政策的差別是這一項的全部重點：ScaleContent 讓內容跟著等比縮放，
+    // KeepContent 只換紙並置中。選錯的後果不對稱——工程圖用了 ScaleContent
+    // 等於比例尺被悄悄改掉，而那份圖之後還會被拿去量。
+    void scaleContentFillsTheNewPaper() {
+        FixturePage page;
+        page.media = domain::RectF{0.0, 0.0, 200.0, 400.0};
+        page.text = "ALPHA";
+        page.textAt = domain::PointF{20.0, 300.0};
+        const std::string source = test::pageops::makeFixturePdf({page});
+
+        ResizePagesRequest request;
+        request.pageSize = domain::SizeF{400.0, 800.0};  // 兩倍
+        request.policy = ResizePolicy::ScaleContent;
+
+        const ResizePagesResult result = resizePages(source, request);
+        QVERIFY2(result.ok(), result.diagnostic.c_str());
+        QCOMPARE(result.resizedPages, 1);
+        QCOMPARE(result.pageCount, 1);
+
+        const auto sizes = readVisiblePageSizes(result.bytes);
+        QCOMPARE(static_cast<int>(sizes.size()), 1);
+        QCOMPARE(sizes[0].width, 400.0);
+        QCOMPARE(sizes[0].height, 800.0);
+
+        // 內容跟著放大：原本在 (20,300) 的文字，兩倍之後落在 (40,600) 附近。
+        // 用區域查詢而不是精確座標——字框本身有高度，精確值會綁死字型度量。
+        const std::string scaled = test::pageops::textInArea(
+            result.bytes, dir_->path(), 0, domain::RectF{0.0, 560.0, 200.0, 660.0});
+        QVERIFY2(contains(scaled, "ALPHA"), "內容沒有跟著縮放");
+
+        assertQpdfClean(result.bytes, QStringLiteral("resize_scale"));
+    }
+
+    void keepContentChangesOnlyThePaperAndCentresTheContent() {
+        FixturePage page;
+        page.media = domain::RectF{0.0, 0.0, 200.0, 400.0};
+        page.text = "ALPHA";
+        page.textAt = domain::PointF{20.0, 300.0};
+        const std::string source = test::pageops::makeFixturePdf({page});
+
+        ResizePagesRequest request;
+        request.pageSize = domain::SizeF{400.0, 800.0};
+        request.policy = ResizePolicy::KeepContent;
+
+        const ResizePagesResult result = resizePages(source, request);
+        QVERIFY2(result.ok(), result.diagnostic.c_str());
+
+        const auto sizes = readVisiblePageSizes(result.bytes);
+        QCOMPARE(sizes[0].width, 400.0);
+        QCOMPARE(sizes[0].height, 800.0);
+
+        // 內容尺寸不變、置中：原內容 200×400 置中於 400×800，左下角平移
+        // (100, 200)，所以原本在 (20,300) 的文字落在 (120,500) 附近。
+        const std::string kept = test::pageops::textInArea(
+            result.bytes, dir_->path(), 0, domain::RectF{100.0, 460.0, 300.0, 560.0});
+        QVERIFY2(contains(kept, "ALPHA"), "內容沒有置中，或被縮放了");
+
+        // 沒有被放大：放大後文字會落在 ScaleContent 那一條的區域裡。
+        const std::string scaledArea = test::pageops::textInArea(
+            result.bytes, dir_->path(), 0, domain::RectF{0.0, 560.0, 100.0, 660.0});
+        QVERIFY2(!contains(scaledArea, "ALPHA"), "KeepContent 竟然縮放了內容");
+
+        assertQpdfClean(result.bytes, QStringLiteral("resize_keep"));
+    }
+
+    // 註解必須跟著同一個矩陣搬。漏掉的症狀是頁面看起來完全正確、標記卻留在原位，
+    // 而那要把註解點開才發現。
+    void annotationsFollowTheResize() {
+        FixturePage page = offsetPage();
+        const std::string source = test::pageops::makeFixturePdf({page});
+
+        const auto before = test::pageops::readAnnotations(source, 0);
+        QCOMPARE(static_cast<int>(before.size()), 1);
+
+        ResizePagesRequest request;
+        request.pageSize = domain::SizeF{1200.0, 1684.0};  // 原本 600×842 的兩倍
+        request.policy = ResizePolicy::ScaleContent;
+
+        const ResizePagesResult result = resizePages(source, request);
+        QVERIFY2(result.ok(), result.diagnostic.c_str());
+        QCOMPARE(result.movedAnnotations, 1);
+
+        const auto after = test::pageops::readAnnotations(result.bytes, 0);
+        QCOMPARE(static_cast<int>(after.size()), 1);
+        // 原框相對於頁面原點是 (20,120)-(120,140)，兩倍後是 (40,240)-(240,280)。
+        QVERIFY2(std::abs(after[0].rect.left - 40.0) < 1.0,
+                 "註解沒有跟著縮放（左緣）");
+        QVERIFY2(std::abs(after[0].rect.bottom - 240.0) < 1.0,
+                 "註解沒有跟著縮放（下緣）");
+    }
+
+    void selectedPagesOnlyAreResized() {
+        FixturePage small;
+        small.media = domain::RectF{0.0, 0.0, 200.0, 400.0};
+        small.text = "ALPHA";
+        small.textAt = domain::PointF{20.0, 300.0};
+        FixturePage other = small;
+        other.text = "BRAVO";
+        const std::string source = test::pageops::makeFixturePdf({small, other});
+
+        ResizePagesRequest request;
+        request.pages = {1};
+        request.pageSize = domain::SizeF{400.0, 800.0};
+        request.policy = ResizePolicy::ScaleContent;
+
+        const ResizePagesResult result = resizePages(source, request);
+        QVERIFY2(result.ok(), result.diagnostic.c_str());
+        QCOMPARE(result.resizedPages, 1);
+        QCOMPARE(result.pageCount, 2);
+
+        const auto sizes = readVisiblePageSizes(result.bytes);
+        QCOMPARE(sizes[0].width, 200.0);  // 沒選到的頁不動
+        QCOMPARE(sizes[1].width, 400.0);
+        // 頁序不變：調整過的頁不該跳到最前面或最後面。
+        QVERIFY(contains(test::pageops::pageText(result.bytes, dir_->path(), 0), "ALPHA"));
+        QVERIFY(contains(test::pageops::pageText(result.bytes, dir_->path(), 1), "BRAVO"));
+    }
+
+    void invalidTargetSizeIsRejected() {
+        const std::string source = test::pageops::makeFixturePdf({offsetPage()});
+
+        ResizePagesRequest request;
+        request.pageSize = domain::SizeF{0.0, 800.0};
+        const ResizePagesResult result = resizePages(source, request);
+        QVERIFY(!result.ok());
+        QCOMPARE(result.status, PageOpsStatus::InvalidRequest);
+        QVERIFY(result.bytes.empty());
+    }
+
 private:
     void assertQpdfClean(const std::string& bytes, const QString& name) {
         const QString path = dir_->path() + QStringLiteral("/%1.pdf").arg(name);

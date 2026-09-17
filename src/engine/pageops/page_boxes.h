@@ -61,4 +61,39 @@ struct NormalizeResult : PageOpsResult {
 // 讀不開的檔案回傳空 vector——呼叫端本來就會先因為別的錯誤停下來。
 [[nodiscard]] std::vector<domain::SizeF> readVisiblePageSizes(const std::string& bytes);
 
+// 頁面尺寸調整（PRD-PAGE-003 的第三項）。
+//
+// 「改紙張大小」有兩種完全不同的意思，而使用者想要哪一種**不能猜**：
+//
+//   ScaleContent — 內容跟著等比縮放填進新紙張。把 A4 的報告印成 A3 時要的
+//                  就是這個；比例尺會變，所以工程圖不該用它。
+//   KeepContent  — 內容維持原尺寸，只換紙張並置中。工程圖換紙時必須用這個：
+//                  圖面上標的 1:100 是紙上的事實，縮放過的圖再量就是錯的。
+//                  新紙比內容小時，超出的部分會被 MediaBox 裁掉——那是這個
+//                  選項的語意本身，UI 必須先講清楚。
+//
+// 兩者都走 Form XObject 重新包裝，所以註解會套用同一個矩陣一起搬；
+// 只改 /MediaBox 的做法（setPageBoxes）不動內容也不動註解，是第三種語意，
+// 不在這裡。
+enum class ResizePolicy : std::uint8_t {
+    ScaleContent,
+    KeepContent,
+};
+
+struct ResizePagesRequest {
+    std::vector<int> pages;      // 留空代表全部頁面
+    domain::SizeF pageSize{};    // 目標紙張（點）
+    ResizePolicy policy{ResizePolicy::ScaleContent};
+    double marginPt{0.0};        // 內容四周留白（ScaleContent 才有意義）
+    bool moveAnnotations{true};
+};
+
+struct ResizePagesResult : PageOpsResult {
+    int resizedPages{0};
+    int movedAnnotations{0};
+};
+
+[[nodiscard]] ResizePagesResult resizePages(std::string sourceBytes,
+                                            const ResizePagesRequest& request);
+
 }  // namespace alioth::engine::pageops

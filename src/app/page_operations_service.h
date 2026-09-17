@@ -19,6 +19,7 @@
 #include "domain/page_operations.h"
 
 #include "domain/page_compose.h"
+#include "engine/pageops/page_boxes.h"
 
 namespace alioth::app {
 
@@ -114,6 +115,20 @@ public:
     // 把空矩形拿去裁切會產出一份沒有內容的頁面。
     [[nodiscard]] PageOperationResult cropToContent(const QString& path,
                                                     const std::vector<int>& pages, RewriteConsent);
+
+    // 頁面尺寸調整（PRD-PAGE-003）。
+    //
+    // 縮放政策不給預設值，因為「改紙張大小」的兩種意思差別很大而且無法從
+    // 操作本身推斷：ScaleContent 讓內容跟著等比縮放（A4 報告印成 A3），
+    // KeepContent 只換紙並置中、內容維持原尺寸（工程圖換紙時的唯一正解——
+    // 圖上標的 1:100 是紙上的事實，縮放過的圖再量就是錯的）。
+    //
+    // pages 留空代表全部頁面。這一項會全檔重寫，且註解跟著同一個矩陣搬。
+    [[nodiscard]] PageOperationResult resizePages(const QString& path,
+                                                  const std::vector<int>& pages,
+                                                  domain::SizeF pageSizePt,
+                                                  engine::pageops::ResizePolicy policy,
+                                                  RewriteConsent);
 
     // 旋轉頁面（PRD-PAGE-*）。角度是**相對**的：在頁面現有的 /Rotate 上累加，
     // 因為使用者按的是「再轉 90 度」而不是「轉成 90 度」。

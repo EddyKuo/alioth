@@ -371,6 +371,32 @@ PageOperationResult PageOperationsService::splitDocument(const QString& path, in
     return result;
 }
 
+PageOperationResult PageOperationsService::resizePages(const QString& path,
+                                                       const std::vector<int>& pages,
+                                                       domain::SizeF pageSizePt,
+                                                       engine::pageops::ResizePolicy policy,
+                                                       RewriteConsent) {
+    PageOperationResult result;
+    QByteArray source;
+    if (!readAll(path, &source, &result.message)) return result;
+
+    engine::pageops::ResizePagesRequest request;
+    request.pages = pages;
+    request.pageSize = pageSizePt;
+    request.policy = policy;
+    request.moveAnnotations = true;
+
+    const auto resized = engine::pageops::resizePages(toStd(source), request);
+    if (!resized.ok()) {
+        result.message = tr("調整頁面尺寸失敗：%1")
+                             .arg(QString::fromStdString(resized.diagnostic));
+        return result;
+    }
+
+    return writeBack(path, source, resized.bytes, resized.pageCount,
+                     tr("已調整 %1 頁的尺寸").arg(resized.resizedPages));
+}
+
 PageOperationResult PageOperationsService::cropToContent(const QString& path,
                                                          const std::vector<int>& pages,
                                                          RewriteConsent) {

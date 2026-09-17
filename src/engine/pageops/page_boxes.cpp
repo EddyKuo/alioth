@@ -3,6 +3,7 @@
 #include <set>
 
 #include "engine/pageops/annotation_transform.h"
+#include "engine/pageops/page_merge.h"
 
 namespace alioth::engine::pageops {
 namespace {
@@ -173,6 +174,70 @@ NormalizeResult normalizePages(std::string sourceBytes, const NormalizeRequest& 
 
     result.pageCount = document.pageCount();
     result.bytes = document.build();
+    return result;
+}
+
+ResizePagesResult resizePages(std::string sourceBytes, const ResizePagesRequest& request) {
+    ResizePagesResult result;
+
+    if (request.pageSize.width <= 0.0 || request.pageSize.height <= 0.0) {
+        result.status = PageOpsStatus::InvalidRequest;
+        result.compose = domain::compose::ComposeStatus::InvalidPageSize;
+        result.diagnostic = "目標紙張尺寸必須為正";
+        return result;
+    }
+
+    // 每一頁各自成一組、各自用 1×1 的版面。這樣就完全沿用 mergePageGroups 的
+    // 那條路徑——Form XObject 的包裝、/Rotate 的烘焙、註解與內容共用同一個
+    // 矩陣，全部是同一份實作。另寫一份「很像但不完全一樣」的縮放邏輯，
+    // 遲早會在其中一份修掉的缺陷留在另一份裡。
+    const std::vector<domain::SizeF> sizes = readVisiblePageSizes(sourceBytes);
+    if (sizes.empty()) {
+        result.status = PageOpsStatus::ContentUnreadable;
+        result.diagnostic = "無法讀取頁面";
+        return result;
+    }
+
+    std::vector<int> pages = request.pages;
+    if (pages.empty()) {
+        pages.resize(sizes.size());
+        for (std::size_t i = 0; i < sizes.size(); ++i) pages[i] = static_cast<int>(i);
+    }
+
+    MergeGroupsRequest merge;
+    merge.moveAnnotations = request.moveAnnotations;
+    merge.removeSourcePages = true;
+    merge.groups.reserve(pages.size());
+    for (const int index : pages) {
+        if (index < 0 || index >= static_cast<int>(sizes.size())) {
+            result.status = PageOpsStatus::PageOutOfRange;
+            result.diagnostic = "頁碼 " + std::to_string(index) + " 超出範圍";
+            return result;
+        }
+        MergeGroup group;
+        group.pages = {index};
+        group.layout.rows = 1;
+        group.layout.columns = 1;
+        group.layout.pageSize = request.pageSize;
+        group.layout.marginPt = request.policy == ResizePolicy::ScaleContent ? request.marginPt : 0.0;
+        group.layout.fit = request.policy == ResizePolicy::ScaleContent
+                               ? domain::compose::CellFit::Contain
+                               : domain::compose::CellFit::None;
+        merge.groups.push_back(std::move(group));
+    }
+
+    const MergeGroupsResult merged = mergePageGroups(std::move(sourceBytes), merge);
+    if (!merged.ok()) {
+        result.status = merged.status;
+        result.compose = merged.compose;
+        result.diagnostic = merged.diagnostic;
+        return result;
+    }
+
+    result.resizedPages = static_cast<int>(merged.mergedPageIndices.size());
+    result.movedAnnotations = merged.movedAnnotations;
+    result.pageCount = merged.pageCount;
+    result.bytes = merged.bytes;
     return result;
 }
 

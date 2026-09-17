@@ -225,6 +225,8 @@ private:
     // 回傳 false 代表使用者取消，或已經改走重新載入。
     [[nodiscard]] bool confirmNoExternalChange(const QString& operation);
     void commitPageOperation(const QString& label, std::function<app::PageOperationResult()> run);
+    // PRD-PAGE-003 頁面尺寸調整。問兩件事：目標紙張，以及內容要不要跟著縮放。
+    void resizePagesWithDialog();
     void applyTextMarkup(domain::TextMarkupKind kind, const QString& label);
     void applyShape(int pageIndex, const domain::RectF& pageRect);
     void commitAnnotation(app::AnnotationRequest request, const QString& label);

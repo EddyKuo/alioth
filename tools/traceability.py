@@ -193,9 +193,14 @@ STATUS = {
                              "擷取不動原檔，因此不進命令堆疊——沒有東西要復原，佔一步會讓 Ctrl+Z 看起來能取消"
                              "那個已經寫出去的檔案"
                             "。應用層的防呆見 tests/pages/test_page_range_service.cpp，頁碼範圍字串的解析見 tests/test_page_range.cpp"),
-    "PRD-PAGE-003": ("部分", "裁切與裁切至白邊已做並接上「組織」選單（一頁都沒裁到時明確回報"
-                             "「沒有偵測到內容邊界」，而不是回報成功卻什麼都沒變）；"
-                             "頁面尺寸調整刻意未做（需內容縮放決策）"),
+    "PRD-PAGE-003": ("完成", "裁切與裁切至白邊已接上「組織」選單（整頁皆白的頁明確跳過——"                             "「沒有偵測到內容邊界」，而不是回報成功卻什麼都沒變）；"
+                             "頁面尺寸調整走 resizePages：兩種縮放政策由使用者選而不給預設，"
+                             "因為「改紙張大小」的兩種意思從操作本身推斷不出來——ScaleContent "
+                             "讓內容等比縮放（A4 報告印成 A3），KeepContent 只換紙並置中、內容維持"
+                             "原尺寸（工程圖的唯一正解：圖上標的 1:100 是紙上的事實，縮放過的圖"
+                             "再量就是錯的）。實作重用 mergePageGroups 的 1×1 版面，所以 Form "
+                             "XObject 包裝、/Rotate 烘焙、註解與內容共用同一個矩陣全是同一份實作。"
+                             "五條測試見 tests/pageops/test_page_boxes.cpp"),
     "PRD-PAGE-004": ("完成", "Bates／頁首頁尾／頁碼／浮水印可印在紙上，也能純附加寫進文件並由文字層讀回。"
                              "已接上「組織」選單：三者共用一個對話框三種預設而不是三份幾乎一樣的程式碼"
                              "（會慢慢分岔，分岔的那份遲早少支援一個符號）；預設只決定開啟時的樣子，"
@@ -377,9 +382,9 @@ STATUS = {
     "PRD-SEC-002": ("部分", "讀出加密演算法與權限旗標、移除密碼（整份解密重寫）皆完成並以真實 RC4 語料端到端驗證；設定新密碼在 PDFium 公開 API 下不可行，明確回報不支援，見 exceptions/EXC_20260906_RD_SA_set_password_unsupported.md"),
     # 介面
     "PRD-UI-002": ("部分", "自研 Ribbon 八分頁 + QAT + 收合 + KeyTips。預設配置 108 顆按鈕，"
-                           "目前 93 顆已接上真正的動作、15 顆仍是停用佔位，且全部有明確歸屬："
+                           "目前 94 顆已接上真正的動作、14 顆仍是停用佔位，且全部有明確歸屬："
                            "PDFium 公開 API 做不到（password / permissions / removeSecurity，見 exceptions/）、"
-                           "R2 或 R3 的項目（sign.timestamp / sign.certify / page.background / page.resize / "
+                           "R2 或 R3 的項目（sign.timestamp / sign.certify / page.background / "
                            "tool.zoomArea / form.tabOrder，依 CLAUDE.md 不提前實作）、"
                            "屬於發佈流程 WP8 的項目（help.checkUpdates / releaseNotes / contents / reportIssue，"
                            "需要真實的更新伺服器與說明網址）、"

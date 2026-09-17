@@ -26,7 +26,7 @@ namespace {
 //
 // 這個數字本身沒有意義，它的作用是棘輪：接上更多動作之後把它調小，
 // 之後任何一次把按鈕加進配置卻忘了註冊動作的改動就會紅。
-constexpr int kMaxUnwiredActions = 15;
+constexpr int kMaxUnwiredActions = 14;  // 2026-09-17：page.resize 接上（PRD-PAGE-003）
 
 }  // namespace
 

@@ -11,6 +11,11 @@ set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app)
 alioth_add_test(test_xfdf_io test_xfdf_io.cpp)
 set_property(TEST test_xfdf_io APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# 匯出選定註解的比對規則（PRD-ANN-013）。純邏輯，不需要檔案。
+alioth_add_test(test_annotation_selection test_annotation_selection.cpp)
+set_property(TEST test_annotation_selection APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # 剪貼簿需要 QApplication（QClipboard 屬於 QtGui），因此走 offscreen 而非 guiless。
 alioth_add_test(test_annotation_clipboard test_annotation_clipboard.cpp)
 set_property(TEST test_annotation_clipboard APPEND PROPERTY

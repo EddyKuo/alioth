@@ -181,7 +181,11 @@ private:
     void exportDocumentWithSummary(SummaryLayout layout);
     // 註解交換（PRD-ANN-013）。格式依檔案內容判定，不依副檔名。
     void importAnnotationsFromFile();
-    void exportAnnotationsToFile();
+    // 匯出全部或只匯出清單裡選定的那幾則。兩者是選單上的兩個項目而不是
+    // 一個會依選取狀態變聰明的項目：同一個入口產出兩種不同的檔案，
+    // 而使用者不見得記得自己在清單裡點過什麼。
+    enum class ExportScope { All, SelectedOnly };
+    void exportAnnotationsToFile(ExportScope scope);
     // PRD-UI-017：把磁碟上的檔案改名，並重新開啟新路徑。
     void renameCurrentDocument();
     // PRD-ZOOM-003 Fit Visible：忽略白邊，縮放到實際內容範圍。

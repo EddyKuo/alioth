@@ -119,6 +119,20 @@ public:
     [[nodiscard]] HighlightResult addAnnotations(const QString& path,
                                                  const std::vector<XfdfEntry>& entries);
 
+    // 從整份匯出結果裡挑出使用者選定的那幾則（PRD-ANN-013「匯出選定註解」）。
+    //
+    // 比對用的是「頁碼 + 子型 + 外框 + 作者 + 內容」而不是索引。索引看起來
+    // 更直接，但兩份清單的來源不同——畫面上的清單來自 PDFium 的列舉，匯出
+    // 的內容來自物件層的 /Annots 走訪，兩者對 Popup 之類的附屬註解是否計入
+    // 並不保證一致。索引一旦錯開，使用者選第 3 則卻匯出第 5 則，而輸出檔
+    // 看起來完全正常。
+    //
+    // 對不上的選取項目不會憑空補一則出來，呼叫端應該把「選了幾則、實際匯出
+    // 幾則」都告訴使用者。
+    [[nodiscard]] static std::vector<XfdfEntry> selectEntries(
+        const std::vector<XfdfEntry>& entries,
+        const std::vector<domain::AnnotationSummary>& wanted);
+
     // 補上作者、時間戳與唯一 ID。呼叫端只需要描述幾何與顏色。
     [[nodiscard]] static domain::Annotation stamped(domain::Annotation annotation,
                                                     const QString& author,

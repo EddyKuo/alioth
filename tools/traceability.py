@@ -298,7 +298,15 @@ STATUS = {
                             "因此復原＝截回原長度、既有簽章維持「有效，簽章後有變更」），全有全無，"
                             "沒有可攤平的註解時不寫檔（空附加段只會讓簽章狀態變差而使用者什麼都沒得到）。"
                             "已接上「註解 → 攤平註解」，確認框說出會攤幾則與略過幾則。"
-                            "測試見 tests/annmgmt/test_annotation_flatten_service.cpp"),
+                            "測試見 tests/annmgmt/test_annotation_flatten_service.cpp。"
+                            "匯出選定註解已補上：註解清單改為可多選，比對用「頁碼＋子型＋外框＋作者＋內容」"
+                            "而不是索引——畫面上的清單來自 PDFium 列舉、匯出的內容來自物件層 /Annots "
+                            "走訪，兩條路徑對 Popup 之類的附屬註解是否計入並不保證一致，索引一旦錯開"
+                            "使用者就會選 A 匯出 B 而輸出檔看起來完全正常。選了 5 則只對上 4 則會明說。"
+                            "比對規則見 tests/annmgmt/test_annotation_selection.cpp。"
+                            "**仍是部分的唯一原因**：驗收條件寫的是「與 Acrobat 互通」，而互通只驗到格式層"
+                            "（往返序列化、XXE 防線），沒有真的用 Acrobat 匯出的檔案匯入過、"
+                            "也沒有讓 Acrobat 讀過我們匯出的檔案。範圍本身已經齊備"),
     "PRD-ANN-020": ("完成", "Eraser：點半徑擦除手繪筆畫，擦中間會把一筆拆成兩筆，過短的碎片直接丟棄。測試見 tests/annmgmt/test_annotation_tools.cpp"),
     "PRD-ANN-023": ("完成", "註解旋轉（各幾何型別繞框心）與 Shift 的 15 度吸附；圖章的 Rect 旋轉後取外接矩形，非 90 度倍數會變大而不是斜擺（已在程式碼註明）。測試見 tests/annmgmt/test_annotation_tools.cpp"),
     "PRD-ANN-029": ("完成", "Comment Styles：只搬顏色／內部色／透明度／邊框，明確不動內容、作者、位置、旗標與幾何。測試見 tests/annmgmt/test_annotation_tools.cpp"),

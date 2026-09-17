@@ -324,6 +324,43 @@ std::vector<XfdfEntry> AnnotationService::readAnnotationsForExport(const QString
     return entries;
 }
 
+std::vector<XfdfEntry> AnnotationService::selectEntries(
+    const std::vector<XfdfEntry>& entries,
+    const std::vector<domain::AnnotationSummary>& wanted) {
+    std::vector<XfdfEntry> selected;
+    if (wanted.empty()) return selected;
+
+    // 外框用容差比對：兩條路徑各自把座標轉過一輪浮點運算，逐位元組相等
+    // 是個過強的要求，而 0.5 點在畫面上小於一個像素，不可能讓兩則不同的
+    // 註解被誤認成同一則。
+    constexpr double kTolerance = 0.5;
+    const auto sameRect = [](const domain::RectF& lhs, const domain::RectF& rhs) {
+        return std::abs(lhs.left - rhs.left) < kTolerance &&
+               std::abs(lhs.bottom - rhs.bottom) < kTolerance &&
+               std::abs(lhs.right - rhs.right) < kTolerance &&
+               std::abs(lhs.top - rhs.top) < kTolerance;
+    };
+
+    // 已經配對過的 entry 不再參與比對：兩則完全相同（同頁、同型、同框、
+    // 同作者、同內容）的註解是合法的，選了一則就該只匯出一則。
+    std::vector<bool> taken(entries.size(), false);
+    for (const domain::AnnotationSummary& summary : wanted) {
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            if (taken[i]) continue;
+            const XfdfEntry& entry = entries[i];
+            if (entry.pageIndex != summary.pageIndex) continue;
+            if (domain::subtypeName(entry.annotation.type()) != summary.subtype) continue;
+            if (!sameRect(entry.annotation.rect, summary.rect)) continue;
+            if (entry.annotation.author != summary.author) continue;
+            if (entry.annotation.contents != summary.contents) continue;
+            selected.push_back(entry);
+            taken[i] = true;
+            break;
+        }
+    }
+    return selected;
+}
+
 HighlightResult AnnotationService::addAnnotations(const QString& path,
                                                  const std::vector<XfdfEntry>& entries) {
     HighlightResult result;

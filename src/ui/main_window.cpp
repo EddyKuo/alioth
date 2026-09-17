@@ -718,7 +718,14 @@ void MainWindow::buildActions() {
     auto* exportAnnotationsAction = commentMenu->addAction(tr("匯出註解(&E)..."));
     registerRibbonAction(QStringLiteral("comment.export"), exportAnnotationsAction);
     connect(exportAnnotationsAction, &QAction::triggered, this,
-            [this] { exportAnnotationsToFile(); });
+            [this] { exportAnnotationsToFile(ExportScope::All); });
+    // 匯出選定註解（PRD-ANN-013）。獨立一個項目而不是讓「匯出註解」依選取
+    // 狀態自己變聰明：那樣同一個選單項目會依畫面上某處的狀態產出兩種不同的
+    // 檔案，而使用者不見得記得自己在清單裡點過什麼。
+    auto* exportSelectedAction = commentMenu->addAction(tr("匯出選定註解..."));
+    registerRibbonAction(QStringLiteral("comment.exportSelected"), exportSelectedAction);
+    connect(exportSelectedAction, &QAction::triggered, this,
+            [this] { exportAnnotationsToFile(ExportScope::SelectedOnly); });
 
     // 註解摘要（PRD-ANN-028）。三種版面各一個入口而不是一個對話框讓使用者選：
     // 三者的輸出物完全不同（一份文字檔 vs 一份新 PDF），混在同一個流程裡
@@ -1527,6 +1534,9 @@ void MainWindow::buildDockPanels() {
     annotationList_ = new QListWidget(commentPanel);
     annotationList_->setObjectName(QStringLiteral("annotationList"));
     annotationList_->setAccessibleName(tr("註解清單"));
+    // 可多選（PRD-ANN-013「匯出選定註解」）。仍然有「目前這一列」的概念，
+    // 所以跳頁與雙擊開啟註釋視窗的行為完全不變。
+    annotationList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     commentLayout->addWidget(annotationList_, 1);
 
     // 點選跳頁時查的是**篩選後那一列對應的原始索引**，不是清單列號。
@@ -2418,14 +2428,35 @@ void MainWindow::exportDocumentWithSummary(SummaryLayout layout) {
     statusBar()->showMessage(tr("%1（%2）").arg(result.message, target), 8000);
 }
 
-void MainWindow::exportAnnotationsToFile() {
+void MainWindow::exportAnnotationsToFile(ExportScope scope) {
+    const QString title =
+        scope == ExportScope::SelectedOnly ? tr("匯出選定註解") : tr("匯出註解");
+
     if (currentPath_.isEmpty() || !controller_->isOpen()) {
-        QMessageBox::information(this, tr("匯出註解"), tr("尚未開啟文件"));
+        QMessageBox::information(this, title, tr("尚未開啟文件"));
         return;
     }
     if (!controller_->info().permissions.copy) {
-        QMessageBox::warning(this, tr("匯出註解"), tr("此文件的權限設定不允許複製內容"));
+        QMessageBox::warning(this, title, tr("此文件的權限設定不允許複製內容"));
         return;
+    }
+
+    // 選定範圍先問：使用者什麼都沒選就跳出存檔對話框，選完檔名才被告知
+    // 「沒有選定任何註解」，那個順序是反的。
+    std::vector<domain::AnnotationSummary> chosen;
+    if (scope == ExportScope::SelectedOnly) {
+        const auto& items = controller_->annotations();
+        for (const QModelIndex& index : annotationList_->selectionModel()->selectedRows()) {
+            const int row = index.row();
+            if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) continue;
+            const std::size_t original = annotationOrder_[static_cast<std::size_t>(row)];
+            if (original < items.size()) chosen.push_back(items[original]);
+        }
+        if (chosen.empty()) {
+            QMessageBox::information(this, title,
+                                     tr("請先在註解清單裡選取要匯出的註解"));
+            return;
+        }
     }
 
     const QString target = QFileDialog::getSaveFileName(
@@ -2434,15 +2465,29 @@ void MainWindow::exportAnnotationsToFile() {
     if (target.isEmpty()) return;
 
     QString error;
-    const std::vector<app::XfdfEntry> entries =
+    std::vector<app::XfdfEntry> entries =
         annotations_->readAnnotationsForExport(currentPath_, &error);
     if (!error.isEmpty()) {
-        QMessageBox::warning(this, tr("匯出註解"), error);
+        QMessageBox::warning(this, title, error);
         return;
     }
     if (entries.empty()) {
-        QMessageBox::information(this, tr("匯出註解"), tr("這份文件沒有可匯出的註解"));
+        QMessageBox::information(this, title, tr("這份文件沒有可匯出的註解"));
         return;
+    }
+
+    int requested = 0;
+    if (scope == ExportScope::SelectedOnly) {
+        requested = static_cast<int>(chosen.size());
+        entries = app::AnnotationService::selectEntries(entries, chosen);
+        if (entries.empty()) {
+            // 選了東西卻一則都對不上，代表檔案在這期間被別的程式改過。
+            // 寫出一份空的 XFDF 是最糟的結果：它看起來成功了。
+            QMessageBox::warning(this, title,
+                                 tr("選取的註解與檔案內容對不上，可能已被其他程式修改。"
+                                    "請重新開啟文件後再試。"));
+            return;
+        }
     }
 
     const std::string sourceName = QFileInfo(currentPath_).fileName().toStdString();
@@ -2452,11 +2497,20 @@ void MainWindow::exportAnnotationsToFile() {
 
     QFile out(target);
     if (!out.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        QMessageBox::warning(this, tr("匯出註解"), tr("無法寫入 %1").arg(target));
+        QMessageBox::warning(this, title, tr("無法寫入 %1").arg(target));
         return;
     }
     out.write(bytes.data(), static_cast<qint64>(bytes.size()));
     out.close();
+
+    // 選了 5 則卻只匯出 4 則一定要說出來。差額的來源是比對不上的項目，
+    // 而使用者拿到的檔案看起來完全正常。
+    if (scope == ExportScope::SelectedOnly && static_cast<int>(entries.size()) < requested) {
+        QMessageBox::warning(this, title,
+                             tr("選取了 %1 則，只有 %2 則對得上檔案內容並已匯出。")
+                                 .arg(requested)
+                                 .arg(entries.size()));
+    }
     statusBar()->showMessage(tr("已匯出 %1 則註解到 %2").arg(entries.size()).arg(target), 5000);
 }
 

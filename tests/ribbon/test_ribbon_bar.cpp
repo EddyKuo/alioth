@@ -9,8 +9,12 @@
 #include <QApplication>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QMenu>
+#include <QScrollArea>
+#include <QScrollBar>
 #include <QSignalSpy>
 #include <QTabBar>
+#include <QToolButton>
 
 #include "app/touch/touch_gestures.h"
 #include "ui/ribbon/action_registry.h"
@@ -433,6 +437,119 @@ private slots:
             }
         }
         QVERIFY2(anySmaller, "關掉觸控模式之後沒有任何按鈕縮回去——開關可能沒有作用");
+    }
+
+    // 窄視窗（PRD-UI-002）。
+    //
+    // 分頁的自然寬度超過視窗時，右側的群組原本直接被裁掉：沒有提示、也沒有
+    // 任何方式到得了那些按鈕。滑鼠完全沒轍，而無障礙稽核只檢查「鍵盤可達」，
+    // 所以掃不出來——焦點確實走得到，只是走到看不見的地方。
+    void narrowWindowScrollsInsteadOfClippingButtons() {
+        ActionRegistry registry;
+        RibbonBar bar(&registry);
+        bar.setLayoutModel(defaultLayout());
+        bar.resize(1600, bar.sizeHint().height());
+        bar.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&bar));
+
+        RibbonPageWidget* page = bar.page(bar.currentPageIndex());
+        QVERIFY(page != nullptr);
+        auto* scroller = qobject_cast<QScrollArea*>(page->parentWidget()->parentWidget());
+        QVERIFY2(scroller != nullptr, "分頁沒有放進捲動容器，窄視窗下右側會被直接裁掉");
+
+        // 窄到一定放不下：預設配置的每個分頁都有多個群組。
+        bar.resize(260, bar.sizeHint().height());
+        QCoreApplication::processEvents();
+        QVERIFY(QTest::qWaitFor([&] {
+            return scroller->horizontalScrollBar()->maximum() > 0;
+        }, 2000));
+
+        QScrollBar* hbar = scroller->horizontalScrollBar();
+        QVERIFY2(hbar->maximum() > 0, "窄視窗下沒有可捲動範圍，右側的群組到不了");
+
+        // 捲到底之後，最後一個群組的右緣必須真的落進可視範圍——
+        // 「有捲軸」不等於「捲得到」：捲動範圍算錯時捲軸照樣出現。
+        hbar->setValue(hbar->maximum());
+        QCoreApplication::processEvents();
+        RibbonGroupWidget* last = page->group(page->groupCount() - 1);
+        QVERIFY(last != nullptr);
+        const int rightEdgeInViewport =
+            last->mapTo(scroller->viewport(), QPoint(last->width(), 0)).x();
+        QVERIFY2(rightEdgeInViewport <= scroller->viewport()->width() + 1,
+                 "捲到底之後最後一個群組仍在可視範圍之外");
+
+        // 縱向不捲：Ribbon 的高度由內容決定，出現縱向捲軸代表版面算錯了。
+        QCOMPARE(scroller->verticalScrollBarPolicy(), Qt::ScrollBarAlwaysOff);
+
+        // 放寬之後捲軸要收掉，不可以留一條永遠在那裡的空捲軸。
+        bar.resize(1600, bar.sizeHint().height());
+        QCoreApplication::processEvents();
+        QVERIFY(QTest::qWaitFor([&] { return hbar->maximum() == 0; }, 2000));
+    }
+
+    // Ribbon 不可以反過來把主視窗撐寬。回內容自然寬度當作最小寬度的話，
+    // 使用者就再也無法把視窗縮小——那是用另一種方式讓按鈕到不了。
+    void ribbonDoesNotImposeAMinimumWindowWidth() {
+        ActionRegistry registry;
+        RibbonBar bar(&registry);
+        bar.setLayoutModel(defaultLayout());
+        QVERIFY2(bar.minimumSizeHint().width() < 400,
+                 "Ribbon 的最小寬度跟著內容走，視窗會被它撐開而縮不回來");
+    }
+
+    // 快速存取列放不下時，多出來的按鈕要進「»」溢位選單而不是被裁掉。
+    // 這一條與上一條是同一件事的兩半：QAT 原本用「所有按鈕的總寬」當硬性下限，
+    // 那個數字直接變成整個主視窗的最小寬度。
+    void quickAccessOverflowsIntoAMenuWhenNarrow() {
+        ActionRegistry registry;
+        QObject owner;
+        Layout layout = twoPageLayout();
+        layout.quickAccessActionIds = {
+            QStringLiteral("file.save"),   QStringLiteral("file.open"),
+            QStringLiteral("edit.undo"),   QStringLiteral("edit.redo"),
+            QStringLiteral("edit.copy"),   QStringLiteral("edit.paste"),
+            QStringLiteral("view.zoomIn"), QStringLiteral("view.zoomOut")};
+        injectActions(registry, layout, &owner);
+        for (const QString& id : layout.quickAccessActionIds) {
+            if (registry.action(id) == nullptr) {
+                registry.registerAction(id, new QAction(id, &owner));
+            }
+        }
+
+        RibbonBar bar(&registry);
+        bar.setLayoutModel(layout);
+        bar.resize(1600, bar.sizeHint().height());
+        bar.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&bar));
+
+        auto* overflow = bar.findChild<QToolButton*>(
+            QStringLiteral("ribbonQuickAccessOverflow"));
+        QVERIFY2(overflow != nullptr, "快速存取列沒有溢位鈕");
+        QVERIFY2(!overflow->isVisible(), "全部放得下時不該出現空的溢位鈕");
+        for (RibbonButton* button : bar.quickAccessButtons()) QVERIFY(button->isVisible());
+
+        bar.resize(200, bar.sizeHint().height());
+        QCoreApplication::processEvents();
+        QVERIFY(QTest::qWaitFor([&] { return overflow->isVisible(); }, 2000));
+
+        // 收進選單的數量要與隱藏的按鈕數一致：兩者對不上代表有按鈕
+        // 既不在列上也不在選單裡——那就是被裁掉了，只是換了個地方裁。
+        int hidden = 0;
+        for (RibbonButton* button : bar.quickAccessButtons()) {
+            if (!button->isVisible()) ++hidden;
+        }
+        QVERIFY(hidden > 0);
+        QVERIFY(overflow->menu() != nullptr);
+        QCOMPARE(overflow->menu()->actions().size(), hidden);
+
+        // 至少留一顆看得見：整列只剩一個「»」的話，使用者看不出那裡本來有東西。
+        QVERIFY2(hidden < bar.quickAccessButtons().size(), "整條快速存取列都消失了");
+
+        // 放寬之後全部回到列上，溢位鈕收掉。
+        bar.resize(1600, bar.sizeHint().height());
+        QCoreApplication::processEvents();
+        QVERIFY(QTest::qWaitFor([&] { return !overflow->isVisible(); }, 2000));
+        for (RibbonButton* button : bar.quickAccessButtons()) QVERIFY(button->isVisible());
     }
 };
 

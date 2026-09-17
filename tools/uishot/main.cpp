@@ -51,13 +51,30 @@ int main(int argc, char** argv) {
 
     const QStringList args = QApplication::arguments();
     if (args.size() < 2) {
-        std::fprintf(stderr, "用法: alioth_uishot <輸出.png>\n");
+        std::fprintf(stderr, "用法: alioth_uishot <輸出.png> [寬 高]\n");
         return 2;
     }
     const QString output = args.at(1);
 
+    // 視窗尺寸可指定。窄視窗的版面問題（工具列被裁掉、面板互相擠壓）只有
+    // 在那個尺寸下才看得見，而預設的 1600×1000 剛好什麼問題都藏得住。
+    int width = 1600;
+    int height = 1000;
+    if (args.size() >= 4) {
+        bool okWidth = false;
+        bool okHeight = false;
+        const int w = args.at(2).toInt(&okWidth);
+        const int h = args.at(3).toInt(&okHeight);
+        if (!okWidth || !okHeight || w <= 0 || h <= 0) {
+            std::fprintf(stderr, "寬與高必須是正整數\n");
+            return 2;
+        }
+        width = w;
+        height = h;
+    }
+
     alioth::ui::MainWindow window;
-    window.resize(1600, 1000);
+    window.resize(width, height);
     window.show();
 
     // 讓版面跑完一輪事件迴圈再抓圖：QWidget::grab 在第一次 show 之後、

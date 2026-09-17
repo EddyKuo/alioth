@@ -18,6 +18,7 @@
 class QHBoxLayout;
 class QStackedWidget;
 class QTabBar;
+class QToolButton;
 
 namespace alioth::ui::ribbon {
 
@@ -80,10 +81,18 @@ signals:
     void actionTriggered(const QString& actionId);
     void layoutModelChanged();
 
+protected:
+    // 快速存取列的寬度變了就要重算溢位。裝在 RibbonBar 上而不是給 QAT
+    // 開一個子類別：這裡只需要一個 resize 通知，不需要一個新型別。
+    bool eventFilter(QObject* watched, QEvent* event) override;
+
 private:
     void buildChrome();
     void rebuild();
     void rebuildQuickAccess();
+    // 快速存取列的溢位處理：放不下的按鈕收進「»」選單，而不是把整條 Ribbon
+    // 的最小寬度撐成所有按鈕的總和（那會讓視窗縮不下去）。
+    void updateQuickAccessOverflow();
     void updateKeyTipTargets();
     void setKeyTipLevel(int level);
 
@@ -99,6 +108,7 @@ private:
     QWidget* quickAccessBar_{nullptr};
     QHBoxLayout* quickAccessLayout_{nullptr};
     QList<RibbonButton*> quickAccessButtons_;
+    QToolButton* quickAccessOverflow_{nullptr};
     bool touchMode_{false};
     QList<RibbonPageWidget*> pages_;
     KeyTipController* keyTips_{nullptr};

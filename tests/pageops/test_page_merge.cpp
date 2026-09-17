@@ -280,6 +280,96 @@ private slots:
         QVERIFY(contains(test::pageops::pageText(result.bytes, dir_->path(), 2), "DELTA"));
     }
 
+    // 一次合成多組（PRD-ANN-028 的「並排」用它）。
+    //
+    // 逐組呼叫 mergePages 也做得到，但那是每組一次全檔重寫——100 組就是重寫
+    // 100 次一份可能 100 MB 的檔案，而症狀只是「很慢」，不會有任何人看得出原因。
+    void mergingSeveralGroupsKeepsEachInItsOwnPlace() {
+        const std::string source = test::pageops::makeFixturePdf(fourPages());
+
+        MergeGroupsRequest request;
+        MergeGroup first;
+        first.pages = {0, 1};
+        first.layout = domain::compose::MergeLayout::nUp(2);
+        MergeGroup second;
+        second.pages = {2, 3};
+        second.layout = domain::compose::MergeLayout::nUp(2);
+        request.groups = {first, second};
+
+        const MergeGroupsResult result = mergePageGroups(source, request);
+        QVERIFY2(result.ok(), result.diagnostic.c_str());
+        QCOMPARE(result.pageCount, 2);
+        QCOMPARE(static_cast<int>(result.mergedPageIndices.size()), 2);
+        // 每一個合成頁站在該組最小原始頁碼的位置上，所以順序與原文件一致。
+        QCOMPARE(result.mergedPageIndices[0], 0);
+        QCOMPARE(result.mergedPageIndices[1], 1);
+
+        const std::string page0 = test::pageops::pageText(result.bytes, dir_->path(), 0);
+        const std::string page1 = test::pageops::pageText(result.bytes, dir_->path(), 1);
+        QVERIFY(contains(page0, "ALPHA"));
+        QVERIFY(contains(page0, "BRAVO"));
+        QVERIFY2(!contains(page0, "CHARLIE"), "第二組的內容跑到第一組的頁面上");
+        QVERIFY(contains(page1, "CHARLIE"));
+        QVERIFY(contains(page1, "DELTA"));
+
+        assertQpdfClean(result.bytes, QStringLiteral("merge_groups"));
+    }
+
+    // 不在任何組裡的頁面原樣留在原本的順序上。並排摘要要靠這一點：
+    // 沒有註解的頁面不該被動到。
+    void pagesOutsideAnyGroupAreLeftAlone() {
+        const std::string source = test::pageops::makeFixturePdf(fourPages());
+
+        MergeGroupsRequest request;
+        MergeGroup group;
+        group.pages = {1, 2};
+        group.layout = domain::compose::MergeLayout::nUp(2);
+        request.groups = {group};
+
+        const MergeGroupsResult result = mergePageGroups(source, request);
+        QVERIFY2(result.ok(), result.diagnostic.c_str());
+        QCOMPARE(result.pageCount, 3);
+        QCOMPARE(result.mergedPageIndices[0], 1);
+
+        QVERIFY(contains(test::pageops::pageText(result.bytes, dir_->path(), 0), "ALPHA"));
+        const std::string merged = test::pageops::pageText(result.bytes, dir_->path(), 1);
+        QVERIFY(contains(merged, "BRAVO"));
+        QVERIFY(contains(merged, "CHARLIE"));
+        QVERIFY(contains(test::pageops::pageText(result.bytes, dir_->path(), 2), "DELTA"));
+    }
+
+    // 同一頁進兩組要明確拒絕。放行的話第二組拿到的是一個已經被搬空註解、
+    // 而且即將從頁面樹移除的頁面——輸出不會錯得很明顯，只是那一頁的標記
+    // 整組消失。
+    void aPageUsedByTwoGroupsIsRejected() {
+        const std::string source = test::pageops::makeFixturePdf(fourPages());
+
+        MergeGroupsRequest request;
+        MergeGroup first;
+        first.pages = {0, 1};
+        MergeGroup second;
+        second.pages = {1, 2};
+        request.groups = {first, second};
+
+        const MergeGroupsResult result = mergePageGroups(source, request);
+        QVERIFY(!result.ok());
+        QCOMPARE(result.status, PageOpsStatus::InvalidRequest);
+        QVERIFY(result.bytes.empty());
+    }
+
+    void outOfRangePageInAGroupIsRejected() {
+        const std::string source = test::pageops::makeFixturePdf(fourPages());
+
+        MergeGroupsRequest request;
+        MergeGroup group;
+        group.pages = {2, 99};
+        request.groups = {group};
+
+        const MergeGroupsResult result = mergePageGroups(source, request);
+        QVERIFY(!result.ok());
+        QCOMPARE(result.status, PageOpsStatus::PageOutOfRange);
+    }
+
 private:
     void assertQpdfClean(const std::string& bytes, const QString& name) {
         const QString path = dir_->path() + QStringLiteral("/%1.pdf").arg(name);

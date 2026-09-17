@@ -176,4 +176,24 @@ NormalizeResult normalizePages(std::string sourceBytes, const NormalizeRequest& 
     return result;
 }
 
+std::vector<domain::SizeF> readVisiblePageSizes(const std::string& bytes) {
+    std::vector<domain::SizeF> sizes;
+
+    ComposeDocument document;
+    if (document.open(bytes) != PageOpsStatus::Ok) return sizes;
+
+    sizes.reserve(static_cast<std::size_t>(document.pageCount()));
+    for (const PdfRef& page : document.pages()) {
+        const domain::RectF box = document.cropBox(page);
+        const int rotation = ((document.rotation(page) % 360) + 360) % 360;
+        // 90 與 270 度時長寬互換。這一步漏掉的話，橫向掃描件在並排版面裡會
+        // 被算成直的，於是縮到只佔格子一半——畫面上像是「圖變小了」，
+        // 而不像是旋轉被忽略。
+        const bool quarterTurn = rotation == 90 || rotation == 270;
+        sizes.push_back(quarterTurn ? domain::SizeF{box.height(), box.width()}
+                                    : domain::SizeF{box.width(), box.height()});
+    }
+    return sizes;
+}
+
 }  // namespace alioth::engine::pageops

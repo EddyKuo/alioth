@@ -477,6 +477,56 @@ PageOperationResult PageOperationsService::rotatePages(const QString& path,
                      tr("已旋轉 %1 頁").arg(pages.size()));
 }
 
+bool PageOperationsService::composeSummaryDocument(
+    const std::vector<std::pair<int, QString>>& summaries, SummaryDocument* out,
+    QString* message) {
+    // 全部摘要排版成**一份**中繼 PDF，每一段摘要各自成頁；再一次插進主文件。
+    //
+    // 逐頁各排一份、逐次插入也做得到，但那是每頁一次全檔重寫：100 頁有註解
+    // 就是 100 次重寫一份可能 100 MB 的檔案。
+    QString combined;
+    // 先逐段排版量出頁數，才知道每一段從中繼文件的第幾頁開始。
+    // 一段摘要可能長到跨頁，假設「一段一頁」會讓長摘要之後的插入點全錯。
+    int cursor = 0;
+    for (const auto& entry : summaries) {
+        if (entry.second.trimmed().isEmpty()) continue;
+        const engine::create::TextImportResult piece =
+            engine::create::createPdfFromPlainText(entry.second.toStdString());
+        if (!piece.ok) {
+            if (message) {
+                *message = piece.nonAscii ? tr("摘要含目前無法排版的字元：%1")
+                                                .arg(QString::fromStdString(piece.diagnostic))
+                                          : tr("摘要排版失敗：%1")
+                                                .arg(QString::fromStdString(piece.diagnostic));
+            }
+            return false;
+        }
+        out->firstPage.push_back(cursor);
+        out->pageCounts.push_back(static_cast<int>(piece.pageCount));
+        out->targets.push_back(entry.first);
+        cursor += static_cast<int>(piece.pageCount);
+        combined += entry.second;
+        // 換頁符：讓下一段摘要從新的一頁開始，與上面量到的頁數一致。
+        combined += QLatin1Char('\f');
+    }
+    if (out->firstPage.empty()) {
+        if (message) *message = tr("這份文件沒有註解可以摘要");
+        return false;
+    }
+
+    const engine::create::TextImportResult composed =
+        engine::create::createPdfFromPlainText(combined.toStdString());
+    if (!composed.ok) {
+        if (message) {
+            *message = tr("摘要排版失敗：%1").arg(QString::fromStdString(composed.diagnostic));
+        }
+        return false;
+    }
+    out->bytes = composed.bytes;
+    out->totalPages = static_cast<int>(composed.pageCount);
+    return true;
+}
+
 PageOperationResult PageOperationsService::insertSummaryPages(
     const QString& path, const std::vector<std::pair<int, QString>>& summaries, RewriteConsent) {
     PageOperationResult result;
@@ -485,57 +535,15 @@ PageOperationResult PageOperationsService::insertSummaryPages(
         return result;
     }
 
-    // 全部摘要排版成**一份**中繼 PDF，每一段摘要各自成頁；再一次插進主文件。
-    //
-    // 逐頁各排一份、逐次插入也做得到，但那是每頁一次全檔重寫：100 頁有註解
-    // 就是 100 次重寫一份可能 100 MB 的檔案。
-    QString combined;
-    std::vector<int> pageBreaks;  // 每一段摘要在中繼文件裡的起始頁
-    std::vector<int> targets;     // 對應要插在主文件的哪一頁之後
-    engine::create::TextImportResult composed;
-    {
-        // 先逐段排版量出頁數，才知道每一段從中繼文件的第幾頁開始。
-        // 一段摘要可能長到跨頁，假設「一段一頁」會讓長摘要之後的插入點全錯。
-        int cursor = 0;
-        for (const auto& entry : summaries) {
-            if (entry.second.trimmed().isEmpty()) continue;
-            const engine::create::TextImportResult piece =
-                engine::create::createPdfFromPlainText(entry.second.toStdString());
-            if (!piece.ok) {
-                result.message = piece.nonAscii
-                                     ? tr("摘要含目前無法排版的字元：%1")
-                                           .arg(QString::fromStdString(piece.diagnostic))
-                                     : tr("摘要排版失敗：%1")
-                                           .arg(QString::fromStdString(piece.diagnostic));
-                return result;
-            }
-            pageBreaks.push_back(cursor);
-            targets.push_back(entry.first);
-            cursor += static_cast<int>(piece.pageCount);
-            combined += entry.second;
-            // 換頁符：讓下一段摘要從新的一頁開始，與上面量到的頁數一致。
-            combined += QLatin1Char('\f');
-        }
-        if (pageBreaks.empty()) {
-            result.message = tr("這份文件沒有註解可以摘要");
-            return result;
-        }
-        composed = engine::create::createPdfFromPlainText(combined.toStdString());
-        if (!composed.ok) {
-            result.message = tr("摘要排版失敗：%1")
-                                 .arg(QString::fromStdString(composed.diagnostic));
-            return result;
-        }
-    }
+    SummaryDocument summary;
+    if (!composeSummaryDocument(summaries, &summary, &result.message)) return result;
 
     std::vector<engine::pageops::PagePlacement> placements;
-    placements.reserve(pageBreaks.size());
-    for (std::size_t i = 0; i < pageBreaks.size(); ++i) {
-        const int lastPage = (i + 1 < pageBreaks.size())
-                                 ? pageBreaks[i + 1] - 1
-                                 : static_cast<int>(composed.pageCount) - 1;
-        for (int page = pageBreaks[i]; page <= lastPage; ++page) {
-            placements.push_back(engine::pageops::PagePlacement{page, targets[i]});
+    placements.reserve(summary.firstPage.size());
+    for (std::size_t i = 0; i < summary.firstPage.size(); ++i) {
+        for (int offset = 0; offset < summary.pageCounts[i]; ++offset) {
+            placements.push_back(engine::pageops::PagePlacement{summary.firstPage[i] + offset,
+                                                                summary.targets[i]});
         }
     }
 
@@ -543,7 +551,7 @@ PageOperationResult PageOperationsService::insertSummaryPages(
     if (!readAll(path, &base, &result.message)) return result;
 
     const auto merged =
-        engine::pageops::interleavePagesFrom(toStd(base), composed.bytes, placements);
+        engine::pageops::interleavePagesFrom(toStd(base), summary.bytes, placements);
     if (!merged.ok()) {
         result.message = tr("插入摘要頁失敗：%1").arg(QString::fromStdString(merged.diagnostic));
         return result;
@@ -551,6 +559,103 @@ PageOperationResult PageOperationsService::insertSummaryPages(
 
     return writeBack(path, base, merged.bytes, merged.pageCount,
                      tr("已插入 %1 頁摘要").arg(merged.insertedPages));
+}
+
+PageOperationResult PageOperationsService::insertSideBySideSummary(
+    const QString& path, const std::vector<std::pair<int, QString>>& summaries, RewriteConsent) {
+    PageOperationResult result;
+    if (summaries.empty()) {
+        result.message = tr("這份文件沒有註解可以摘要");
+        return result;
+    }
+
+    SummaryDocument summary;
+    if (!composeSummaryDocument(summaries, &summary, &result.message)) return result;
+
+    QByteArray base;
+    if (!readAll(path, &base, &result.message)) return result;
+
+    // 原頁面的可見尺寸要在插入摘要頁**之前**讀：插完之後頁碼全部位移，
+    // 而並排的目標頁尺寸是依原頁面算的。
+    const std::vector<domain::SizeF> sizes =
+        engine::pageops::readVisiblePageSizes(toStd(base));
+    if (sizes.empty()) {
+        result.message = tr("無法讀取頁面尺寸");
+        return result;
+    }
+
+    // 第一次重寫：把摘要頁插到各自的目標頁之後，與「文件加摘要」完全相同。
+    std::vector<engine::pageops::PagePlacement> placements;
+    for (std::size_t i = 0; i < summary.firstPage.size(); ++i) {
+        for (int offset = 0; offset < summary.pageCounts[i]; ++offset) {
+            placements.push_back(engine::pageops::PagePlacement{summary.firstPage[i] + offset,
+                                                                summary.targets[i]});
+        }
+    }
+    const auto interleaved =
+        engine::pageops::interleavePagesFrom(toStd(base), summary.bytes, placements);
+    if (!interleaved.ok()) {
+        result.message = tr("插入摘要頁失敗：%1")
+                             .arg(QString::fromStdString(interleaved.diagnostic));
+        return result;
+    }
+
+    // 換算並排要用的頁碼。插入之後，原本第 p 頁的位置等於
+    // 「p 加上所有目標頁碼小於 p 的摘要頁數」，它的第一張摘要頁緊接在後面。
+    // 直接假設「原頁 p 在第 2p 頁」是錯的：沒有註解的頁不會插摘要。
+    std::vector<int> insertedBefore(sizes.size() + 1, 0);
+    for (std::size_t i = 0; i < summary.targets.size(); ++i) {
+        const int target = summary.targets[i];
+        if (target < 0 || target >= static_cast<int>(sizes.size())) continue;
+        insertedBefore[static_cast<std::size_t>(target) + 1] += summary.pageCounts[i];
+    }
+    for (std::size_t i = 1; i < insertedBefore.size(); ++i) {
+        insertedBefore[i] += insertedBefore[i - 1];
+    }
+
+    std::vector<engine::pageops::MergeGroup> groups;
+    groups.reserve(summary.targets.size());
+    for (std::size_t i = 0; i < summary.targets.size(); ++i) {
+        const int target = summary.targets[i];
+        if (target < 0 || target >= static_cast<int>(sizes.size())) continue;
+        if (summary.pageCounts[i] <= 0) continue;
+
+        const int originalIndex = target + insertedBefore[static_cast<std::size_t>(target)];
+        const domain::SizeF size = sizes[static_cast<std::size_t>(target)];
+        if (size.width <= 0.0 || size.height <= 0.0) continue;
+
+        engine::pageops::MergeGroup group;
+        // 只併第一張摘要頁。摘要長到跨頁時，其餘幾張留在後面自成整頁——
+        // 硬塞進同一個半邊只能靠縮小字級，那會讓長摘要變得讀不了，
+        // 而讀不了的摘要等於沒有摘要。
+        group.pages = {originalIndex, originalIndex + 1};
+        group.layout.rows = 1;
+        group.layout.columns = 2;
+        group.layout.fit = domain::compose::CellFit::Contain;
+        // 兩倍寬、等高：原內容維持原尺寸，摘要佔右半。
+        group.layout.pageSize = domain::SizeF{size.width * 2.0, size.height};
+        groups.push_back(std::move(group));
+    }
+
+    if (groups.empty()) {
+        result.message = tr("這份文件沒有註解可以摘要");
+        return result;
+    }
+
+    // 第二次重寫：所有並排頁在同一次開檔裡合成完。
+    engine::pageops::MergeGroupsRequest request;
+    request.groups = std::move(groups);
+    request.moveAnnotations = true;
+    request.removeSourcePages = true;
+    const auto composed = engine::pageops::mergePageGroups(interleaved.bytes, request);
+    if (!composed.ok()) {
+        result.message = tr("並排合成失敗：%1").arg(QString::fromStdString(composed.diagnostic));
+        return result;
+    }
+
+    return writeBack(path, base, composed.bytes, composed.pageCount,
+                     tr("已產生 %1 頁並排摘要")
+                         .arg(static_cast<int>(composed.mergedPageIndices.size())));
 }
 
 PageOperationResult PageOperationsService::normalize(const QString& path, RewriteConsent) {

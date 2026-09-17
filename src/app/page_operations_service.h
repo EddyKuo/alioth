@@ -130,6 +130,18 @@ public:
         const QString& path, const std::vector<std::pair<int, QString>>& summaries,
         RewriteConsent);
 
+    // 「並排」（PRD-ANN-028 的第三種版面）：每一頁與它的摘要併成一張，
+    // 左邊原頁面、右邊摘要。目標頁是原頁面的兩倍寬、等高，所以原內容維持
+    // 原尺寸不縮小——把正文縮成一半來騰出摘要空間，等於為了看註解而讓
+    // 正文變得難讀，而使用者是為了對照才選並排的。
+    //
+    // 沒有註解的頁面**原樣保留**，不會併出一張右半空白的頁。
+    // 整份文件重寫兩次（插入摘要頁、合成並排頁），與逐頁合成的 N 次相比
+    // 是固定成本。
+    [[nodiscard]] PageOperationResult insertSideBySideSummary(
+        const QString& path, const std::vector<std::pair<int, QString>>& summaries,
+        RewriteConsent);
+
     [[nodiscard]] PageOperationResult normalize(const QString& path, RewriteConsent);
 
     // 復原：把先前保留的原始位元組寫回去。
@@ -137,6 +149,20 @@ public:
                                QString* message = nullptr);
 
 private:
+    // 排版好的摘要中繼文件。三種版面（僅摘要／文件加摘要／並排）共用同一份：
+    // 差別只在之後怎麼放，不在摘要本身長什麼樣。
+    struct SummaryDocument {
+        std::string bytes;
+        int totalPages{0};
+        std::vector<int> firstPage;   // 每一段摘要在中繼文件裡的起始頁
+        std::vector<int> pageCounts;  // 每一段佔幾頁（一段可能長到跨頁）
+        std::vector<int> targets;     // 對應主文件的哪一頁（0 起算，插入前的編號）
+    };
+
+    [[nodiscard]] bool composeSummaryDocument(
+        const std::vector<std::pair<int, QString>>& summaries, SummaryDocument* out,
+        QString* message);
+
     [[nodiscard]] PageOperationResult writeBack(const QString& path, const QByteArray& previous,
                                                 const std::string& bytes, int pageCount,
                                                 const QString& successMessage);

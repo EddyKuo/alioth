@@ -20,8 +20,10 @@
 
 #include "app/page_operations_service.h"
 #include "engine/fonts/cjk_font_library.h"
+#include "engine/pageops/page_boxes.h"
 #include "pageops_fixture.h"
 #include "pageops_readback.h"
+#include "qa/qpdf_check.h"
 
 using namespace alioth;
 using alioth::test::pageops::FixturePage;
@@ -130,7 +132,119 @@ private slots:
         QCOMPARE(readAll(path), before);
     }
 
+    // 並排（PRD-ANN-028 的第三種版面）：每一頁與它的摘要併成一張，
+    // 目標頁兩倍寬、等高。原內容維持原尺寸——把正文縮成一半來騰出摘要空間，
+    // 等於為了看註解而讓正文變難讀，而使用者正是為了對照才選並排的。
+    void sideBySidePlacesSummaryOnTheRightHalf() {
+        const QString path = writeFixture(*dir_, QStringLiteral("side.pdf"),
+                                          {textPage("PageOne"), textPage("PageTwo")});
+        QVERIFY(!path.isEmpty());
+
+        app::PageOperationsService service;
+        const auto result = service.insertSideBySideSummary(
+            path, {{0, QStringLiteral("Note on page one")}},
+            app::RewriteConsent::confirmed());
+        QVERIFY2(result.ok, result.message.toUtf8().constData());
+
+        const std::string bytes = readAll(path);
+        // 頁數不變：原頁與摘要頁併成一張，不是多出一張。
+        QCOMPARE(alioth::test::pageops::documentPageCount(bytes), 2);
+
+        const auto sizes = alioth::engine::pageops::readVisiblePageSizes(bytes);
+        QCOMPARE(static_cast<int>(sizes.size()), 2);
+        QCOMPARE(sizes[0].width, 800.0);   // 400 × 2
+        QCOMPARE(sizes[0].height, 600.0);
+        // 沒有註解的頁面原樣保留，不該被併成一張右半空白的頁。
+        QCOMPARE(sizes[1].width, 400.0);
+
+        // 兩邊的內容都要在同一頁上，而且各在各的半邊。
+        const std::string left = alioth::test::pageops::textInArea(
+            bytes, dir_->path(), 0, domain::RectF{0, 0, 400, 600});
+        const std::string right = alioth::test::pageops::textInArea(
+            bytes, dir_->path(), 0, domain::RectF{400, 0, 800, 600});
+        QVERIFY2(left.find("PageOne") != std::string::npos, "原頁面不在左半邊");
+        QVERIFY2(right.find("Note on page one") != std::string::npos, "摘要不在右半邊");
+        QVERIFY2(left.find("Note on page one") == std::string::npos,
+                 "摘要跑到左半邊，兩者疊在一起");
+
+        // 第二頁沒有註解，內容原樣。
+        const std::string second = alioth::test::pageops::pageText(bytes, dir_->path(), 1);
+        QVERIFY(second.find("PageTwo") != std::string::npos);
+
+        assertQpdfClean(path);
+    }
+
+    // 多頁都有註解時，每一張並排頁都要留在它原本的位置。
+    // 由後往前插入的技巧一旦寫反，症狀是「第 30 頁之後全部對不上」，
+    // 兩頁的測試文件完全看不出來——所以這裡用四頁、註解分佈在頭尾。
+    void sideBySideKeepsPageOrderAcrossSeveralPages() {
+        const QString path =
+            writeFixture(*dir_, QStringLiteral("side_many.pdf"),
+                         {textPage("Alpha"), textPage("Bravo"), textPage("Charlie"),
+                          textPage("Delta")});
+        QVERIFY(!path.isEmpty());
+
+        app::PageOperationsService service;
+        const auto result = service.insertSideBySideSummary(
+            path,
+            {{0, QStringLiteral("First note")},
+             {2, QStringLiteral("Third note")},
+             {3, QStringLiteral("Fourth note")}},
+            app::RewriteConsent::confirmed());
+        QVERIFY2(result.ok, result.message.toUtf8().constData());
+
+        const std::string bytes = readAll(path);
+        QCOMPARE(alioth::test::pageops::documentPageCount(bytes), 4);
+
+        const auto sizes = alioth::engine::pageops::readVisiblePageSizes(bytes);
+        QCOMPARE(static_cast<int>(sizes.size()), 4);
+        QCOMPARE(sizes[0].width, 800.0);  // 有註解 → 並排
+        QCOMPARE(sizes[1].width, 400.0);  // 沒有註解 → 原樣
+        QCOMPARE(sizes[2].width, 800.0);
+        QCOMPARE(sizes[3].width, 800.0);
+
+        // 每一頁的原文都還在它原本的順序上。
+        const char* expected[] = {"Alpha", "Bravo", "Charlie", "Delta"};
+        for (int i = 0; i < 4; ++i) {
+            const std::string text = alioth::test::pageops::pageText(bytes, dir_->path(), i);
+            QVERIFY2(text.find(expected[i]) != std::string::npos,
+                     std::string("第 ").append(std::to_string(i))
+                         .append(" 頁不是 ").append(expected[i]).c_str());
+        }
+        // 摘要也要各自跟對頁面，不能全部跑到同一頁去。
+        QVERIFY(alioth::test::pageops::pageText(bytes, dir_->path(), 0).find("First note") !=
+                std::string::npos);
+        QVERIFY(alioth::test::pageops::pageText(bytes, dir_->path(), 2).find("Third note") !=
+                std::string::npos);
+        QVERIFY(alioth::test::pageops::pageText(bytes, dir_->path(), 3).find("Fourth note") !=
+                std::string::npos);
+
+        assertQpdfClean(path);
+    }
+
+    void sideBySideWithoutAnyCommentsLeavesTheFileAlone() {
+        const QString path =
+            writeFixture(*dir_, QStringLiteral("side_blank.pdf"), {textPage("Alpha")});
+        const std::string before = readAll(path);
+
+        app::PageOperationsService service;
+        const auto result = service.insertSideBySideSummary(path, {{0, QStringLiteral("  ")}},
+                                                            app::RewriteConsent::confirmed());
+        QVERIFY(!result.ok);
+        QVERIFY(!result.message.isEmpty());
+        QCOMPARE(readAll(path), before);
+    }
+
 private:
+    // qpdf 不存在時 QSKIP 而不是通過：CI 上缺工具卻靜默綠燈，比紅燈更糟。
+    void assertQpdfClean(const QString& path) {
+        const test::QpdfCheckResult check = test::runQpdfCheck(path);
+        if (check.status == test::QpdfStatus::NotAvailable) {
+            QSKIP("找不到 qpdf，結構檢查略過");
+        }
+        QVERIFY2(check.clean(), check.output.toUtf8().constData());
+    }
+
     std::unique_ptr<QTemporaryDir> dir_;
 };
 

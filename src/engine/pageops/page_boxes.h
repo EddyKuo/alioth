@@ -52,4 +52,13 @@ struct NormalizeResult : PageOpsResult {
 [[nodiscard]] NormalizeResult normalizePages(std::string sourceBytes,
                                              const NormalizeRequest& request);
 
+// 每一頁的可見尺寸（/CropBox，含 /Rotate 之後的長寬互換），依頁序。
+//
+// 給的是「這一頁看起來多大」，不是 /MediaBox 的原始數字：要把一頁放進版面裡，
+// 需要的是它顯示出來的形狀。/Rotate 90 的 A4 直向頁在版面上是橫的，
+// 用未旋轉的尺寸去算格子，結果是內容超出格子邊界或縮得過小。
+//
+// 讀不開的檔案回傳空 vector——呼叫端本來就會先因為別的錯誤停下來。
+[[nodiscard]] std::vector<domain::SizeF> readVisiblePageSizes(const std::string& bytes);
+
 }  // namespace alioth::engine::pageops

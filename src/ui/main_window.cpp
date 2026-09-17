@@ -734,7 +734,11 @@ void MainWindow::buildActions() {
     auto* summaryWithDocAction = summaryMenu->addAction(tr("文件加摘要（每頁後插入）..."));
     registerRibbonAction(QStringLiteral("comment.summaryWithDocument"), summaryWithDocAction);
     connect(summaryWithDocAction, &QAction::triggered, this,
-            [this] { exportDocumentWithSummary(); });
+            [this] { exportDocumentWithSummary(SummaryLayout::InsertAfterEachPage); });
+    auto* summarySideBySideAction = summaryMenu->addAction(tr("並排（左原文、右摘要）..."));
+    registerRibbonAction(QStringLiteral("comment.summarySideBySide"), summarySideBySideAction);
+    connect(summarySideBySideAction, &QAction::triggered, this,
+            [this] { exportDocumentWithSummary(SummaryLayout::SideBySide); });
 
     // 攤平註解（PRD-ANN-013）。放在摘要下面而不是與匯入匯出並列：後兩者是
     // 可逆的資料搬運，攤平之後那些標記在任何檢視器裡都不再是註解。
@@ -2351,14 +2355,19 @@ void MainWindow::exportCommentSummary() {
     statusBar()->showMessage(tr("已摘要 %1 則註解到 %2").arg(entries.size()).arg(target), 5000);
 }
 
-void MainWindow::exportDocumentWithSummary() {
+void MainWindow::exportDocumentWithSummary(SummaryLayout layout) {
+    const QString title = layout == SummaryLayout::SideBySide ? tr("並排摘要") : tr("文件加摘要");
+    const QString suffix = layout == SummaryLayout::SideBySide
+                               ? QStringLiteral("-side-by-side.pdf")
+                               : QStringLiteral("-summary.pdf");
+
     if (currentPath_.isEmpty() || !controller_->isOpen()) {
-        QMessageBox::information(this, tr("文件加摘要"), tr("尚未開啟文件"));
+        QMessageBox::information(this, title, tr("尚未開啟文件"));
         return;
     }
     const auto entries = app::CommentSummaryService::build(controller_->annotations());
     if (entries.empty()) {
-        QMessageBox::information(this, tr("文件加摘要"), tr("這份文件沒有註解"));
+        QMessageBox::information(this, title, tr("這份文件沒有註解"));
         return;
     }
 
@@ -2369,19 +2378,18 @@ void MainWindow::exportDocumentWithSummary() {
         summaries.emplace_back(page, std::move(text));
     }
     if (summaries.empty()) {
-        QMessageBox::information(this, tr("文件加摘要"), tr("這份文件沒有註解"));
+        QMessageBox::information(this, title, tr("這份文件沒有註解"));
         return;
     }
 
     const QString target = QFileDialog::getSaveFileName(
-        this, tr("文件加摘要"),
-        QFileInfo(currentPath_).completeBaseName() + QStringLiteral("-summary.pdf"),
+        this, title, QFileInfo(currentPath_).completeBaseName() + suffix,
         tr("PDF 檔案 (*.pdf)"));
     if (target.isEmpty()) return;
     if (QFileInfo(target) == QFileInfo(currentPath_)) {
         // 產出的是一份新文件，不是對原檔的編輯。覆蓋原檔會讓使用者失去
         // 沒有摘要頁的版本，而那正是他之後還要繼續審閱的那一份。
-        QMessageBox::warning(this, tr("文件加摘要"),
+        QMessageBox::warning(this, title,
                              tr("請選擇與原文件不同的檔名——摘要頁會寫進新檔，不動原檔。"));
         return;
     }
@@ -2389,19 +2397,22 @@ void MainWindow::exportDocumentWithSummary() {
     if (!QFile::copy(currentPath_, target)) {
         // getSaveFileName 已經問過覆蓋，所以這裡先移除舊檔再複製。
         if (!QFile::remove(target) || !QFile::copy(currentPath_, target)) {
-            QMessageBox::warning(this, tr("文件加摘要"), tr("無法建立 %1").arg(target));
+            QMessageBox::warning(this, title, tr("無法建立 %1").arg(target));
             return;
         }
     }
 
-    // 摘要頁的文字目前只能是 ASCII（標準 14 字型），非 ASCII 的註解內容會讓
-    // 排版明確失敗而不是靜默丟字。失敗時把剛複製的檔案清掉，不留下一份
-    // 沒加摘要卻叫做 -summary.pdf 的檔案。
-    const app::PageOperationResult result = pageOps_->insertSummaryPages(
-        target, summaries, app::RewriteConsent::confirmed());
+    // 畫不出來的字（內嵌子集裡沒有的字形）會讓排版明確失敗而不是靜默丟字。
+    // 失敗時把剛複製的檔案清掉，不留下一份沒加摘要卻叫做 -summary.pdf 的檔案。
+    const app::PageOperationResult result =
+        layout == SummaryLayout::SideBySide
+            ? pageOps_->insertSideBySideSummary(target, summaries,
+                                                app::RewriteConsent::confirmed())
+            : pageOps_->insertSummaryPages(target, summaries,
+                                           app::RewriteConsent::confirmed());
     if (!result.ok) {
         QFile::remove(target);
-        QMessageBox::warning(this, tr("文件加摘要"), result.message);
+        QMessageBox::warning(this, title, result.message);
         return;
     }
     statusBar()->showMessage(tr("%1（%2）").arg(result.message, target), 8000);

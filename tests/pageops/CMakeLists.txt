@@ -21,6 +21,7 @@ alioth_add_test(test_page_boxes test_page_boxes.cpp pageops_fixture.h pageops_re
 # 還要確認摘要這條路徑沒有自己再擋一次非 ASCII。
 set(ALIOTH_TEST_LIBS ${ALIOTH_TEST_LIBS} Alioth::app Alioth::fonts)
 alioth_add_test(test_summary_pages test_summary_pages.cpp pageops_fixture.h pageops_readback.h)
+target_include_directories(test_summary_pages PRIVATE ${CMAKE_SOURCE_DIR}/tests)
 
 foreach(_target test_page_merge test_page_overlay test_page_boxes test_summary_pages)
     target_include_directories(${_target} PRIVATE ${CMAKE_SOURCE_DIR}/tests)

@@ -172,11 +172,13 @@ private:
     // 鉛筆筆畫（PRD-ANN-003）：平滑 → 依壓力切成數個線寬層 → 一次寫成
     // 數則 /Ink。/Ink 只有單一 /BS /W，變寬的筆畫只能用多則註解模擬。
     void applyPencilStroke(int pageIndex, const std::vector<domain::PressurePoint>& points);
-    // 註解摘要（PRD-ANN-028）。「僅摘要」輸出一份純文字；「文件加摘要」
-    // 產生一份新的 PDF，每一頁後面插入該頁的摘要頁——刻意不動原檔。
+    // 註解摘要（PRD-ANN-028）。「僅摘要」輸出一份純文字；另外兩種產生一份
+    // 新的 PDF——「文件加摘要」在每頁後插入摘要頁，「並排」把每頁與它的摘要
+    // 併成一張（左原文、右摘要）。三者都刻意不動原檔。
     void exportCommentSummary();
     void flattenAnnotations();  // PRD-ANN-013
-    void exportDocumentWithSummary();
+    enum class SummaryLayout { InsertAfterEachPage, SideBySide };
+    void exportDocumentWithSummary(SummaryLayout layout);
     // 註解交換（PRD-ANN-013）。格式依檔案內容判定，不依副檔名。
     void importAnnotationsFromFile();
     void exportAnnotationsToFile();

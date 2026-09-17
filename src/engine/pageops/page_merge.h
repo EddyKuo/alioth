@@ -46,4 +46,32 @@ struct MergePagesResult : PageOpsResult {
 [[nodiscard]] MergePagesResult mergePages(std::string sourceBytes,
                                           const MergePagesRequest& request);
 
+// 一次合成多組（PRD-ANN-028 的「並排」版面）。
+//
+// 並排 = 每一頁與它的摘要頁併成一張。逐對呼叫 mergePages 也做得到，
+// 但那是每對一次全檔重寫：100 頁有註解就是重寫 100 次一份可能 100 MB 的檔案，
+// 而症狀只是「很慢」，不會有任何人看得出原因。這個入口在同一份開啟的文件裡
+// 把所有組都合成完，只重寫一次。
+//
+// 每一組的合成頁站在該組**最小的原始頁碼**的位置上，所以並排的結果與原文件
+// 的頁序一致。組與組之間的來源頁必須互斥。
+struct MergeGroup {
+    std::vector<int> pages;               // 0 起算的原始頁碼，順序即填格順序
+    domain::compose::MergeLayout layout{};  // 每組可以有自己的版面
+};
+
+struct MergeGroupsRequest {
+    std::vector<MergeGroup> groups;
+    bool moveAnnotations{true};
+    bool removeSourcePages{true};
+};
+
+struct MergeGroupsResult : PageOpsResult {
+    std::vector<int> mergedPageIndices;  // 與 groups 的頁序一致（由小到大）
+    int movedAnnotations{0};
+};
+
+[[nodiscard]] MergeGroupsResult mergePageGroups(std::string sourceBytes,
+                                                const MergeGroupsRequest& request);
+
 }  // namespace alioth::engine::pageops

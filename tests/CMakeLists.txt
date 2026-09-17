@@ -57,6 +57,9 @@ alioth_add_test(test_pdfium_engine test_pdfium_engine.cpp pdf_fixture.h)
 # 命令堆疊只依賴 app 層，不需要引擎。
 set(ALIOTH_TEST_LIBS Alioth::app)
 alioth_add_test(test_command_stack test_command_stack.cpp)
+# 顯示品質選項（PRD-VIEW-013）。守「平滑線條」與 strokeAdjust 的反向對映，
+# 以及改了選項一定要作廢舊圖磚——兩者寫錯都不會有錯誤訊息。
+alioth_add_test(test_render_quality test_render_quality.cpp)
 alioth_add_test(test_settings test_settings.cpp)
 alioth_add_test(test_session test_session.cpp)
 alioth_add_test(test_history_store test_history_store.cpp)
@@ -94,12 +97,11 @@ set_property(TEST test_navigation_service APPEND PROPERTY ENVIRONMENT "QT_QPA_PL
 set_property(TEST test_history_store APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_property(TEST test_session APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 set_property(TEST test_settings APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+set_property(TEST test_render_quality APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# 並行搜尋需要引擎的文字子系統。
+# 預建文字索引（PRD-SRCH-001，ADR-005）。與逐頁 PDFium 搜尋互相驗證：
+# 2 秒／500 頁的預算由單一擷取器預建索引達成，不靠並行。
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::text)
-# PDFium 跨文件並行的可行性隔離實驗（EXC_20260905_RD_SA_parallel_search）。
-# 這支不是產品行為測試，它回答 SDD 1.1 的架構前提成不成立。
-# 預建文字索引（PRD-SRCH-001，ADR-005）。與逐頁 PDFium 搜尋互相驗證。
 alioth_add_test(test_text_index test_text_index.cpp)
 set_property(TEST test_text_index APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
@@ -108,17 +110,14 @@ alioth_add_test(test_pdfium_concurrency test_pdfium_concurrency.cpp)
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::text)
 set_property(TEST test_pdfium_concurrency APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-alioth_add_test(test_parallel_search test_parallel_search.cpp)
-set_property(TEST test_parallel_search APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
-
-# 這支測試會間歇性堆積毀損（0xc0000374）或 SEGFAULT——那正是它要記錄的缺陷本身
-# （見 exceptions/EXC_20260905_RD_SA_parallel_search.md）。
+# 並行搜尋的缺陷重現器移到 tests/diagnostics/：它會間歇性堆積毀損（0xc0000374）
+# 或 SEGFAULT，那正是它要記錄的現象本身（EXC_20260905_RD_SA_parallel_search、ADR-005）。
 #
-# 標成 DISABLED 而不是刪掉：ctest 會把它列成「已停用」，缺陷因此仍然看得見；
-# 而讓一支會隨機崩潰的測試留在套件裡，代價是整個套件失去可信度——
-# 「偶爾紅一下」很快就會被當成正常現象，真正的失敗也就跟著被忽略。
-# 隔離工作要跑它時：ctest -R test_parallel_search --force-new-ctest-process
-set_tests_properties(test_parallel_search PROPERTIES DISABLED TRUE)
+# 曾經用 DISABLED TRUE 留在套件裡，但那讓 ctest 報「182 個測試」而實際只有 181 個
+# 提供保護——被停用的那一個還是缺陷重現器，不是產品行為測試，永遠不會被啟用。
+# 現在它只是一個可手動執行的診斷程式，而「產品不得啟用並行 PDFium 路徑」
+# 這條真正該守的規則由 tools/check_layering.py 靜態檢查（CI 會跑）。
+add_subdirectory(diagnostics)
 
 # 戳記寫入需要應用層與文字擷取（讀回驗證），以及 qpdf 的結構檢查輔助。
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app Alioth::text)

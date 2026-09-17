@@ -17,3 +17,6 @@ third_party/qpdf/bin/
 # 取得方式寫在 CLAUDE.md。授權檔（OFL.txt）必須隨字型一起散布，因此保留。
 third_party/fonts/*.ttf
 third_party/fonts/*.otf
+
+# Python 產生的位元組碼（tools/ 底下的腳本被匯入時會產生）。
+__pycache__/

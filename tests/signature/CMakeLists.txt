@@ -57,3 +57,9 @@ set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app Alioth::ui)
 alioth_add_test(test_signature_panel test_signature_panel.cpp)
 set_property(TEST test_signature_panel APPEND PROPERTY
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# 簽署對話框的欄位狀態（PRD-SIG-006）。守的是「做不到的功能不可以長得像做得到」。
+set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app Alioth::ui Alioth::signature)
+alioth_add_test(test_sign_dialog test_sign_dialog.cpp)
+set_property(TEST test_sign_dialog APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

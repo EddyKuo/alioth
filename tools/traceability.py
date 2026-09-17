@@ -99,7 +99,11 @@ STATUS = {
     "PRD-ANN-033": ("完成", "Find and Redact 產生標記，`tests/redaction/test_find_and_redact.cpp` 13 例：命中外框以語料已知座標驗證、上限截斷會回報、標記後輸入檔逐位元組不變（標記絕不套用）"),
     "PRD-SRCH-003": ("完成", "尋找並取代限註解內文與表單欄位值（PRD §2.1 排除內文編輯），`tests/compare/test_find_replace.cpp` 15 例含「頁面內容串流逐位元組未被碰」與 /NeedAppearances"),
     "PRD-VIEW-011": ("完成", "Ribbon Layout（頁面左右排列）：同列相鄰、不等高垂直置中、座標往返自洽、RTL 反向，`tests/test_horizontal_layout.cpp` 10 例；已接上檢視選單與 Ribbon 版面群組"),
-    "PRD-VIEW-013": ("部分", "Stroke Adjust 對映到 FPDF_RENDER_NO_SMOOTHPATH（近似而非規格等價，已在標頭寫明限制），另補灰階與關閉平滑化旗標；尚未接上檢視選單"),
+    "PRD-VIEW-013": ("部分", "Stroke Adjust 對映到 FPDF_RENDER_NO_SMOOTHPATH（近似而非規格等價，已在標頭寫明限制），"
+                             "另補灰階與關閉平滑化旗標。已接上「檢視 → 顯示品質」四個項目並註冊為 Ribbon 動作；"
+                             "「平滑線條」與 strokeAdjust 是反向對映，連同「改了選項一定要作廢舊圖磚」"
+                             "由 tests/test_render_quality.cpp 釘住。仍是部分：近似不等於規格語意，"
+                             "工程圖上 0.1 pt 的線在低倍率下仍可能整條消失（取樣問題，不是抗鋸齒問題）"),
     "PRD-ANN-015": ("完成", "檔案附件註解已接上工具列（先框位置再問檔案——拖出矩形的當下就已經決定了"
                             "「放這裡」，先跳檔案對話框會讓那個手勢懸在半空）；擋掉「把文件附加到它自己裡面」。"
                             "附件讀寫兩側齊備：文件層 /EmbeddedFiles 與檔案附件註解都可列可加、名稱樹合併不會弄丟既有附件、二進位內容往返無損、qpdf 檢查乾淨；面板只提供另存不提供開啟，檔名經清理防路徑穿越"),
@@ -307,8 +311,10 @@ STATUS = {
                             "插入走新增的 interleavePagesFrom：收下原始頁碼、一次算完順序、"
                             "整份只重寫一次——逐次插入會位移且是每頁一次全檔重寫。"
                             "摘要頁的分頁靠 layoutPlainText 新增的 \\f 支援。"
-                            "並排版面未做（需要把兩頁縮排到同一頁的合成，與插頁不是同一條路徑）；"
-                            "摘要文字目前限 ASCII（標準 14 字型），非 ASCII 會明確失敗而不是靜默丟字"),
+                            "中文摘要已可用：走 ADR-007 的內嵌思源黑體子集，內嵌字型不在時明確失敗"
+                            "而不是靜默丟字——空白的摘要頁會被誤讀成「這頁沒有註解」。"
+                            "服務層入口的插入位置、CJK 與空白摘要三條路徑見 tests/pageops/test_summary_pages.cpp。"
+                            "仍是部分：並排版面未做（需要把兩頁縮排到同一頁的合成，與插頁不是同一條路徑）"),
     # 文字選取與搜尋（WP31）
     "PRD-TXT-003": ("完成", "矩形（區域）選取與表格切欄分列（列看 y 重疊、欄看 x 自然斷點，不假設 PDF 有表格結構——絕大多數 PDF 沒有結構資訊，假設有的實作在真實文件上會整個失效）、複製為 TSV。已接上「區域選取」工具，框選放開即複製到剪貼簿。測試見 tests/textsearch/test_table_extraction.cpp"),
     "PRD-TXT-005": ("完成", "快照工具：只渲染框選區域而非整頁（允許的光柵化例外，理由寫在程式碼），含裁切與邊界；已接上工具列與剪貼簿。dpi 依目前檢視倍率換算而非固定 150——固定值會讓放大檢視時截到比畫面還糊的圖，而那正是使用者用快照的時機。測試見 tests/textsearch/test_snapshot.cpp"),
@@ -396,7 +402,11 @@ STATUS = {
     "PRD-ENH-001": ("完成", "頁面背景：純色與影像、Fit/Fill/Stretch、九宮格對齊、留白、旋轉、透明度；插在既有內容之前。測試見 tests/enhance/test_enhance_pdf.cpp"),
     "PRD-ENH-002": ("完成", "去斜（投影剖面法，±15 度內）與對比／亮度／灰階／Otsu 二值化；整頁重新點陣化，既有文字層會被光柵化。測試見 tests/enhance/test_scan_enhance.cpp 與 tests/enhance/test_image_ops.cpp"),
     "PRD-ENH-003": ("完成", "指定 dpi 點陣化，/Annots 與 /Rotate 不動，DCT/Flate/Auto 三種編碼。測試見 tests/enhance/test_enhance_pdf.cpp"),
-    "PRD-ENH-004": ("部分", "影像重壓縮：DCT/Flate、8-bit Gray/RGB、/SMask 併回；targetDpi 重取樣未實作，索引色／CMYK／CCITT 回報不支援"),
+    "PRD-ENH-004": ("部分", "影像重壓縮：DCT/Flate、8-bit Gray/RGB。目前不重取樣、尺寸不變，"
+                            "因此 /SMask 與間接 /Mask 原樣保留（不是併回 alpha 再輸出）——"
+                            "遮罩必須與主影像同尺寸，重取樣一旦實作就得連遮罩一起處理，"
+                            "見 src/engine/enhance/image_recompressor.h。targetDpi 重取樣未實作，"
+                            "索引色／CMYK／CCITT 回報不支援"),
     "PRD-ENH-005": ("完成", "文件屬性對話框，含不支援項目的降級說明；tests/test_document_properties_dialog.cpp 驗 XFA 與 JavaScript 的降級文字"
                            "真的出現，且普通文件不出現多餘警告——把警告常態化，使用者就不再讀它了"),
 }
@@ -504,6 +514,36 @@ def _assert_completed_rows_cite_evidence() -> None:
 
 
 _assert_completed_rows_cite_evidence()
+
+
+def _assert_cited_paths_exist() -> None:
+    """備註裡引用的檔案路徑必須真的存在。
+
+    上一道閘門只問「有沒有指出來」，指到哪裡不管。那擋不住這一類腐化：
+    檔案改名或搬走之後，備註仍然理直氣壯地指著一個不存在的位置，而且
+    整份矩陣重新產生也不會有任何抱怨——輸出檔逐位元組一致，資料本身卻已經
+    是錯的。並行搜尋的重現器從 tests/ 搬到 tests/diagnostics/ 就是這種情形。
+
+    只檢查存在，不檢查內容。內容對不對沒有機器判得出來的方法，但「指到的
+    檔案不存在」是純粹的事實問題，沒有理由讓它留到 code review 才被發現。
+    """
+    import re
+
+    cited = re.compile(r"\b(?:tests|src|tools|docs|exceptions)/[A-Za-z0-9_./-]*[A-Za-z0-9_]")
+    missing = []
+    for key, (_status, note) in STATUS.items():
+        for path in sorted(set(cited.findall(note))):
+            # 備註常寫成 `tests/measure/` 這種目錄形式，兩者都接受。
+            if not (ROOT / path).exists():
+                missing.append("{}：{}".format(key, path))
+    if missing:
+        raise SystemExit(
+            "下列備註引用了不存在的路徑（檔案搬走或改名後備註沒跟上）：\n  "
+            + "\n  ".join(sorted(missing))
+        )
+
+
+_assert_cited_paths_exist()
 
 # PRD §2.1 明確排除的功能族。這些不該出現在「未完成」的焦慮清單裡。
 OUT_OF_SCOPE_NOTE = "PRD §2.1 排除"

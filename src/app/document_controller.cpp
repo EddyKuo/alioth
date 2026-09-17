@@ -27,6 +27,11 @@ constexpr std::int32_t kInitialGeometryPages = 32;
 // 跳成真實尺寸——那個跳動比多花一點時間載入更明顯。
 constexpr std::int32_t kGeometryLookahead = 8;
 
+// 頁面幾何的請求次數上限與重試退避基數。上限 3 次是因為暫時性失敗幾乎都
+// 是佇列取消或短暫鎖定，一次退避就會過；真正損壞的頁面重試一百次也一樣。
+constexpr std::uint8_t kMaxGeometryAttempts = 3;
+constexpr int kGeometryRetryBaseMs = 250;
+
 }  // namespace
 
 DocumentController::DocumentController(QObject* parent)
@@ -59,7 +64,8 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
     ++documentGeneration_;
     cache_.clear();
     pageSizes_.clear();
-    geometryRequested_.clear();
+    geometryState_.clear();
+    geometryAttempts_.clear();
     open_ = false;
 
     engine_->openDocument(
@@ -76,7 +82,10 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
                     info_ = result.info;
                     open_ = true;
                     pageSizes_.assign(static_cast<std::size_t>(info_.pageCount), domain::SizeF{});
-                    geometryRequested_.assign(static_cast<std::size_t>(info_.pageCount), char{0});
+                    geometryState_.assign(static_cast<std::size_t>(info_.pageCount),
+                                          PageGeometryState::NotRequested);
+                    geometryAttempts_.assign(static_cast<std::size_t>(info_.pageCount),
+                                             std::uint8_t{0});
                     loadPageGeometry();
                     emit documentOpened(path);
                     requestOutline();
@@ -91,7 +100,8 @@ void DocumentController::closeDocument() {
     ++documentGeneration_;
     cache_.clear();
     pageSizes_.clear();
-    geometryRequested_.clear();
+    geometryState_.clear();
+    geometryAttempts_.clear();
     outline_.clear();
     annotations_.clear();
     links_.clear();
@@ -117,34 +127,80 @@ void DocumentController::ensurePageGeometry(std::int32_t fromPage, std::int32_t 
 
     const std::int32_t first = std::max(0, fromPage);
     const std::int32_t last = std::min(count - 1, toPage);
-    const std::uint64_t generation = documentGeneration_;
 
     for (std::int32_t i = first; i <= last; ++i) {
-        if (geometryRequested_[static_cast<std::size_t>(i)] != 0) continue;
-        geometryRequested_[static_cast<std::size_t>(i)] = 1;
-        engine_->pageInfo(i, [this, i, generation](std::optional<domain::PageInfo> info) {
-            if (!info) return;
-            const domain::SizeF size = info->sizePt;
-            QMetaObject::invokeMethod(
-                this,
-                [this, i, generation, size] {
-                    // 換過文件之後，前一份文件還在路上的尺寸不可以寫進來：
-                    // 頁碼同樣合法，寫進去不會有任何錯誤，只會讓新文件的
-                    // 某幾頁沿用舊文件的紙張尺寸。
-                    if (generation != documentGeneration_) return;
-                    if (i >= static_cast<std::int32_t>(pageSizes_.size())) return;
-                    if (pageSizes_[static_cast<std::size_t>(i)] == size) return;
-                    pageSizes_[static_cast<std::size_t>(i)] = size;
-                    emit pageGeometryChanged();
-                },
-                Qt::QueuedConnection);
-        });
+        if (geometryState_[static_cast<std::size_t>(i)] != PageGeometryState::NotRequested) continue;
+        requestPageGeometry(i);
     }
 }
 
+void DocumentController::requestPageGeometry(std::int32_t index) {
+    const auto slot = static_cast<std::size_t>(index);
+    geometryState_[slot] = PageGeometryState::Pending;
+    ++geometryAttempts_[slot];
+    const std::uint64_t generation = documentGeneration_;
+
+    engine_->pageInfo(index, [this, index, generation](std::optional<domain::PageInfo> info) {
+        // nullopt 也必須回到控制器執行緒處理。早期版本在這裡直接 return，
+        // 結果那一頁永遠停在「已請求」而沒有任何人知道它失敗了，畫面就
+        // 一直是 A4 佔位，看起來和「還在載入」完全一樣。
+        const std::optional<domain::SizeF> size =
+            info ? std::optional<domain::SizeF>{info->sizePt} : std::nullopt;
+        QMetaObject::invokeMethod(
+            this,
+            [this, index, generation, size] {
+                // 換過文件之後，前一份文件還在路上的尺寸不可以寫進來：
+                // 頁碼同樣合法，寫進去不會有任何錯誤，只會讓新文件的
+                // 某幾頁沿用舊文件的紙張尺寸。
+                if (generation != documentGeneration_) return;
+                if (index >= static_cast<std::int32_t>(pageSizes_.size())) return;
+                const auto slot = static_cast<std::size_t>(index);
+                if (geometryState_[slot] != PageGeometryState::Pending) return;
+
+                if (size) {
+                    geometryState_[slot] = PageGeometryState::Ready;
+                    if (pageSizes_[slot] == *size) return;
+                    pageSizes_[slot] = *size;
+                    emit pageGeometryChanged();
+                    return;
+                }
+
+                if (geometryAttempts_[slot] >= kMaxGeometryAttempts) {
+                    // 重試用盡：定案為失敗，不再送出請求。呼叫端改用
+                    // pageGeometryState() 區分「還在載入」與「這頁壞了」。
+                    geometryState_[slot] = PageGeometryState::Failed;
+                    emit pageGeometryChanged();
+                    return;
+                }
+
+                // 有限次數的退避重試。暫時性失敗（佇列被取消、檔案短暫被鎖）
+                // 值得再試，但損壞的頁面每次都會失敗——固定間隔的無限重試
+                // 會讓那條唯一的 PDFium 執行緒一直被這頁佔著。
+                geometryState_[slot] = PageGeometryState::NotRequested;
+                const int delayMs = kGeometryRetryBaseMs * geometryAttempts_[slot];
+                QTimer::singleShot(delayMs, this, [this, index, generation] {
+                    if (generation != documentGeneration_) return;
+                    if (index >= static_cast<std::int32_t>(pageSizes_.size())) return;
+                    if (geometryState_[static_cast<std::size_t>(index)] !=
+                        PageGeometryState::NotRequested) {
+                        return;
+                    }
+                    requestPageGeometry(index);
+                });
+            },
+            Qt::QueuedConnection);
+    });
+}
+
 bool DocumentController::pageGeometryKnown(std::int32_t index) const {
-    if (index < 0 || index >= static_cast<std::int32_t>(pageSizes_.size())) return false;
-    return !pageSizes_[static_cast<std::size_t>(index)].isEmpty();
+    return pageGeometryState(index) == PageGeometryState::Ready;
+}
+
+PageGeometryState DocumentController::pageGeometryState(std::int32_t index) const {
+    if (index < 0 || index >= static_cast<std::int32_t>(geometryState_.size())) {
+        return PageGeometryState::NotRequested;
+    }
+    return geometryState_[static_cast<std::size_t>(index)];
 }
 
 domain::SizeF DocumentController::pageSizePt(std::int32_t index) const {

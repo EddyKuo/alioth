@@ -53,6 +53,16 @@ struct TileScheduleOptions {
     bool zooming{false};
 };
 
+// 單一頁面真實尺寸的載入狀態。只有 Ready 代表 pageSizePt() 回的是真值；
+// 其餘三者 pageSizePt() 都回 A4 佔位。分成四態是因為呼叫端對「還在載入」
+// 與「已經失敗」該做的事完全不同：前者等，後者要顯示問題並停止等待。
+enum class PageGeometryState {
+    NotRequested,  // 尚未送出請求（例如捲動還沒到）
+    Pending,       // 請求在路上
+    Ready,         // 已取得真實尺寸
+    Failed,        // 重試次數用盡，該頁永遠不會有真實尺寸
+};
+
 class DocumentController : public QObject {
     Q_OBJECT
 
@@ -70,6 +80,9 @@ public:
     // 真實尺寸是否已經問到。false 代表 pageSizePt() 現在回的是 A4 佔位值，
     // 呼叫端若要做「對齊實際紙張」之類的決定，必須先等它變 true。
     [[nodiscard]] bool pageGeometryKnown(std::int32_t index) const;
+    // 四態版本。pageGeometryKnown() 等同於 state == Ready，保留是因為多數
+    // 呼叫端只關心「能不能用這個尺寸」。
+    [[nodiscard]] PageGeometryState pageGeometryState(std::int32_t index) const;
 
     // 按需補載頁面尺寸。開檔時只先問前 kInitialGeometryPages 頁——一次問一萬頁
     // 會塞爆那條唯一的 PDFium 執行緒，而版面只需要看得到的那幾頁。
@@ -174,9 +187,13 @@ private:
 
     domain::DocumentInfo info_{};
     std::vector<domain::SizeF> pageSizes_;
-    // 已送出 pageInfo 請求的頁。沒有這張表的話，每次捲動都會對同一批頁面
+    // 每一頁的幾何載入狀態。沒有這張表的話，每次捲動都會對同一批頁面
     // 重送請求，而那條 PDFium 執行緒是全行程唯一的一條。
-    std::vector<char> geometryRequested_;
+    std::vector<PageGeometryState> geometryState_;
+    // 已送出的請求次數（含正在進行的那次）。損壞的頁面每次都會失敗，
+    // 無限重試只會讓那條唯一的 PDFium 執行緒空轉，所以次數有上限。
+    std::vector<std::uint8_t> geometryAttempts_;
+    void requestPageGeometry(std::int32_t index);
     engine::save::AutosaveManager autosave_;
     class QTimer* autosaveTimer_{nullptr};
     TileScheduleOptions lastOptions_{};

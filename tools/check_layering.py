@@ -1,10 +1,12 @@
 """分層檢查（CLAUDE.md 的架構硬約束）。
 
-三條規則，違反了會在 CI 擋下來而不是等到 code review：
+五條規則，違反了會在 CI 擋下來而不是等到 code review：
 
 1. 只有引擎層的 target 可以連結 pdfium
 2. 領域層不得連結 Qt（領域層的測試因此不需要 QApplication）
 3. 只有平台層可以有 #ifdef _WIN32
+4. 每個 PDFium 呼叫點都要在 PdfiumGuard 底下
+5. 產品程式碼不得接線並行 PDFium 路徑（ADR-005）
 
 這些規則原本靠 CMake 的 target 相依「自然」維持，但那只擋得住連結錯誤，
 擋不住有人在 src/ui 裡寫 #include <fpdfview.h> 然後透過某個 PUBLIC 相依
@@ -109,6 +111,38 @@ def check_pdfium_serialisation():
     return violations
 
 
+PARALLEL_SEARCH_USE = re.compile(r"\bParallelSearchSession\b")
+
+# 定義 ParallelSearchSession 的檔案本身。它們是 ADR-005 的墓碑：保留下來是為了讓
+# 「為什麼不這樣做」有實體可指，不是為了被呼叫。
+PARALLEL_SEARCH_DEFINITION = {
+    "src/engine/text/parallel_search.h",
+    "src/engine/text/parallel_search.cpp",
+}
+
+
+def check_no_parallel_pdfium():
+    """產品程式碼不得接線並行 PDFium 路徑（ADR-005）。
+
+    ADR-005 量到的事實是：PDFium 的文件把手可並存、不可並行，兩條執行緒同時
+    進去會**安靜地掉資料**，之後整個行程的開檔開始失敗。壞掉的方式不是崩潰，
+    所以「跑起來沒事」不能當證據，只能靠這種靜態檢查擋在接線的那一刻。
+
+    重現器本身（tests/diagnostics/）不在檢查範圍內——它的工作就是重現那個現象。
+    """
+    violations = []
+    for path in source_files(SRC):
+        rel = relative(path)
+        if rel in PARALLEL_SEARCH_DEFINITION:
+            continue
+        text = strip_comments(open(path, encoding="utf-8", errors="replace").read())
+        if PARALLEL_SEARCH_USE.search(text):
+            violations.append(
+                "{}：不得接線並行 PDFium 搜尋（ADR-005；改用單一擷取器預建文字索引）"
+                .format(rel))
+    return violations
+
+
 def main():
     violations = []
 
@@ -143,6 +177,7 @@ def main():
                     "{}：作業系統差異只能收在平台層".format(relative(path)))
 
     violations.extend(check_pdfium_serialisation())
+    violations.extend(check_no_parallel_pdfium())
 
     if violations:
         print("分層檢查失敗：")

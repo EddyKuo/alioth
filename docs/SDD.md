@@ -8,7 +8,8 @@
 | 適用範圍 | R1；R2 / R3 的新子系統需增修本文件 |
 
 本文件描述「為什麼這樣分層」與「哪些限制不可違反」。功能需求看 PRD，
-工作進度看 `sprint/current/status.md`，日常開發規則看 `CLAUDE.md`。
+工作進度看 `sprint/current/status.md`（數字在 `sprint/current/metrics.md`，自動產生），
+日常開發規則看 `CLAUDE.md`。
 
 ---
 

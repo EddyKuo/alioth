@@ -49,10 +49,20 @@ SignDialog::SignDialog(QWidget* parent) : QDialog(parent) {
     contact_->setObjectName(QStringLiteral("signContact"));
     form->addRow(tr("聯絡方式"), contact_);
 
+    // 時間戳（PRD-SIG-006）排在 R3：底層 RFC 3161 元件已經有了，但應用層的
+    // TSA 傳輸與「同意連網」流程還沒接上。欄位因此停用而不是可輸入——
+    // 可輸入的欄位等於承諾這個功能能用，而使用者要填完整份簽署表單、按下
+    // 「簽署」之後才會被告知不支援。停用並標示規劃狀態，成本在按下之前。
     timestampUrl_ = new QLineEdit(this);
     timestampUrl_->setObjectName(QStringLiteral("signTimestampUrl"));
-    timestampUrl_->setPlaceholderText(tr("留空（尚未支援）"));
-    form->addRow(tr("時間戳伺服器"), timestampUrl_);
+    timestampUrl_->setEnabled(false);
+    timestampUrl_->setPlaceholderText(tr("規劃中（PRD-SIG-006）：尚未支援 TSA 連線"));
+    timestampUrl_->setToolTip(
+        tr("時間戳需要連線到外部 TSA 伺服器。該流程（含連網同意）尚未實作，"
+           "簽章的簽署時間目前由簽署者自行宣告。"));
+    auto* timestampLabel = new QLabel(tr("時間戳伺服器（規劃中）"), this);
+    timestampLabel->setObjectName(QStringLiteral("signTimestampLabel"));
+    form->addRow(timestampLabel, timestampUrl_);
 
     auto* hint = new QLabel(
         tr("簽署以增量方式寫入檔案末端，原有內容一個位元組都不會被改動——"

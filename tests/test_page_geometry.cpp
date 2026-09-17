@@ -73,6 +73,61 @@ bool waitForGeometry(app::DocumentController& controller, std::int32_t page, int
     return true;
 }
 
+// 一份第 5 頁載不起來的文件：該頁的 Kids 項目指向一個不存在的物件。
+// 文件本身仍然合法可開，只有那一頁會讓 FPDF_LoadPage 失敗——這正是
+// pageInfo() 回 nullopt 的真實情境。
+QByteArray makePdfWithBrokenPage(int brokenPage) {
+    std::vector<QByteArray> objects;
+    objects.push_back("<< /Type /Catalog /Pages 2 0 R >>");
+
+    QByteArray kids;
+    for (int i = 0; i < kPageCount; ++i) {
+        if (i > 0) kids += " ";
+        // 壞頁指向 9000 號物件，而檔案裡根本沒有那個物件。
+        kids += QByteArray::number(i == brokenPage ? 9000 : i + 3) + " 0 R";
+    }
+    objects.push_back("<< /Type /Pages /Kids [" + kids + "] /Count " +
+                      QByteArray::number(kPageCount) + " >>");
+
+    for (int i = 0; i < kPageCount; ++i) {
+        objects.push_back(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 595 842] /Resources << >> >>");
+    }
+
+    QByteArray pdf = "%PDF-1.7\n";
+    std::vector<int> offsets;
+    for (int i = 0; i < static_cast<int>(objects.size()); ++i) {
+        offsets.push_back(static_cast<int>(pdf.size()));
+        pdf += QByteArray::number(i + 1) + " 0 obj\n" + objects[static_cast<std::size_t>(i)] +
+               "\nendobj\n";
+    }
+
+    const int xref = static_cast<int>(pdf.size());
+    pdf += "xref\n0 " + QByteArray::number(static_cast<int>(objects.size()) + 1) +
+           "\n0000000000 65535 f \n";
+    for (const int offset : offsets) {
+        pdf += QByteArray::number(offset).rightJustified(10, '0') + " 00000 n \n";
+    }
+    pdf += "trailer\n<< /Size " + QByteArray::number(static_cast<int>(objects.size()) + 1) +
+           " /Root 1 0 R >>\nstartxref\n" + QByteArray::number(xref) + "\n%%EOF\n";
+    return pdf;
+}
+
+// 等某一頁的幾何狀態脫離 Pending／NotRequested，也就是定案為 Ready 或 Failed。
+bool waitForGeometrySettled(app::DocumentController& controller, std::int32_t page,
+                            int timeoutMs = 10000) {
+    QElapsedTimer timer;
+    timer.start();
+    while (true) {
+        const app::PageGeometryState state = controller.pageGeometryState(page);
+        if (state == app::PageGeometryState::Ready || state == app::PageGeometryState::Failed) {
+            return true;
+        }
+        if (timer.elapsed() > timeoutMs) return false;
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+    }
+}
+
 }  // namespace
 
 class TestPageGeometry : public QObject {
@@ -191,6 +246,63 @@ private slots:
         controller.scheduleTiles({request2}, {});
         QVERIFY(waitForGeometry(controller, 40));
         QCOMPARE(controller.pageSizePt(40), (domain::SizeF{595.0, 842.0}));
+    }
+
+    // 幾何在請求送出前是 NotRequested、送出後是 Pending、拿到尺寸後是 Ready。
+    // 三者都對應「pageGeometryKnown() == false」，所以只看那個布林值的
+    // 呼叫端分不出「還在載入」和「這頁壞了」。
+    void geometryStateDistinguishesPendingFromReady() {
+        app::DocumentController controller;
+        QSignalSpy opened(&controller, &app::DocumentController::documentOpened);
+        controller.openDocument(path_);
+        QVERIFY(opened.wait(10000));
+
+        QCOMPARE(controller.pageGeometryState(kFirstOversizePage),
+                 app::PageGeometryState::NotRequested);
+        QVERIFY(waitForGeometry(controller, 0));
+        QCOMPARE(controller.pageGeometryState(0), app::PageGeometryState::Ready);
+
+        // 超出頁碼範圍一律回 NotRequested，不可以讓呼叫端以為那是失敗。
+        QCOMPARE(controller.pageGeometryState(-1), app::PageGeometryState::NotRequested);
+        QCOMPARE(controller.pageGeometryState(kPageCount + 10),
+                 app::PageGeometryState::NotRequested);
+    }
+
+    // 載不起來的頁面必須在有限次重試後定案為 Failed，而不是永遠停在
+    // 「已請求」。舊版在 pageInfo 回 nullopt 時直接 return，那一頁因此
+    // 既不會重試、也沒有任何人看得出它失敗了，畫面就一直是 A4 佔位。
+    void brokenPageSettlesAsFailedAndStopsRetrying() {
+        const QString brokenPath = dir_->filePath(QStringLiteral("broken_page.pdf"));
+        QFile file(brokenPath);
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        constexpr int kBrokenPage = 5;
+        file.write(makePdfWithBrokenPage(kBrokenPage));
+        file.close();
+
+        app::DocumentController controller;
+        QSignalSpy opened(&controller, &app::DocumentController::documentOpened);
+        controller.openDocument(brokenPath);
+        QVERIFY(opened.wait(10000));
+
+        QVERIFY2(waitForGeometrySettled(controller, kBrokenPage),
+                 "壞頁的幾何狀態一直停在 Pending，代表失敗沒有被回報也沒有重試上限");
+        QCOMPARE(controller.pageGeometryState(kBrokenPage), app::PageGeometryState::Failed);
+        QVERIFY(!controller.pageGeometryKnown(kBrokenPage));
+        // 失敗的頁仍然要有可用的佔位尺寸，版面不可以塌成 0 高度。
+        QCOMPARE(controller.pageSizePt(kBrokenPage), (domain::SizeF{595.0, 842.0}));
+
+        // 同一份文件裡的好頁不受影響。
+        QVERIFY(waitForGeometry(controller, 0));
+        QCOMPARE(controller.pageSizePt(0), (domain::SizeF{595.0, 842.0}));
+
+        // 定案之後不再送出請求：再排程一次那一頁，狀態必須留在 Failed。
+        app::PageTileRequest request;
+        request.pageIndex = kBrokenPage;
+        request.visibleInPage = domain::RectI{0, 0, 400, 400};
+        request.pageSize = domain::RectI{0, 0, 595, 842};
+        controller.scheduleTiles({request}, {});
+        for (int i = 0; i < 20; ++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+        QCOMPARE(controller.pageGeometryState(kBrokenPage), app::PageGeometryState::Failed);
     }
 
 private:

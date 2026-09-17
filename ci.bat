@@ -9,14 +9,14 @@ set PRESET=%1
 if "%PRESET%"=="" set PRESET=windows-x64-release
 set BDIR=out\build\%PRESET%
 
-echo [1/5] configure and build
+echo [1/6] configure and build
 call "D:\code\Alioth\build.bat" %PRESET% || goto :fail
 
-echo [2/5] tests
+echo [2/6] tests
 call "C:\Program Files (x86)\Microsoft Visual Studio\2022\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul
 ctest --test-dir %BDIR% --output-on-failure || goto :fail
 
-echo [3/5] performance regression gate
+echo [3/6] performance regression gate
 REM PRD section 9 defines the gate as "block on >10%% regression against the baseline",
 REM not "block on absolute budget". Budget violations are still printed loudly.
 REM The known full-text search overshoot is tracked in
@@ -30,14 +30,22 @@ REM and comparing across them would produce noise that looks like regressions.
 REM Refresh deliberately with --update-baseline after an intended change.
 "%BDIR%\alioth_bench.exe" --generate 500 --steps 60 --baseline tests\perf_baseline_%PRESET%.json || goto :fail
 
-echo [4/5] traceability matrix is current
+echo [4/6] traceability matrix is current
 python tools\traceability.py || goto :fail
 
-echo [5/5] layering check
+echo [5/6] layering check
 REM Catches PDFium headers outside the engine layer, Qt in the domain layer, and
 REM #ifdef _WIN32 outside the platform layer. CMake target deps only catch link
 REM errors; a PUBLIC dependency can let a layering violation compile cleanly.
 python tools\check_layering.py || goto :fail
+
+echo [6/6] sprint metrics
+REM Test counts and requirement stats are generated, never hand-written.
+REM sprint/current/status.md once claimed both "13 test targets green" and
+REM "24 test targets green" in the same file while the real number was in the
+REM hundreds - a status document with wrong numbers cannot be used for
+REM scheduling or as a release gate, and it causes duplicated work.
+python tools\sprint_status.py %PRESET% || goto :fail
 
 echo.
 echo [CI OK] %PRESET%

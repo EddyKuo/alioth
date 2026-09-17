@@ -25,6 +25,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -1492,7 +1493,9 @@ struct HtmlExtraction {
     bool ok{false};
     std::string diagnostic;
     std::string title;
-    std::string bodyText;  // 已去標籤、已解碼常見實體、僅保留可列印 ASCII 與換行
+    // 已去標籤、已解碼常見實體（含數字 entity，輸出 UTF-8）、空白已折疊。
+    // 字元是否畫得出來由下游的 createPdfFromPlainText 判定，這裡不先過濾。
+    std::string bodyText;
 };
 
 namespace detail {
@@ -1526,6 +1529,47 @@ inline void stripTagWithContent(std::string& html, const std::string& tagLower) 
     }
 }
 
+// 把一個 Unicode scalar value 編成 UTF-8 附加到 out。呼叫端必須先確認
+// 它是合法 scalar（非 surrogate、≤ U+10FFFF）。
+inline void appendUtf8(std::string& out, char32_t cp) {
+    if (cp < 0x80) {
+        out.push_back(static_cast<char>(cp));
+    } else if (cp < 0x800) {
+        out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else if (cp < 0x10000) {
+        out.push_back(static_cast<char>(0xE0 | (cp >> 12)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    } else {
+        out.push_back(static_cast<char>(0xF0 | (cp >> 18)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 12) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | ((cp >> 6) & 0x3F)));
+        out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+    }
+}
+
+// 解析數字 entity 的數值部分。自己走一遍字元而不用 strtol，是因為 strtol
+// 會接受前導空白與正負號（`&#+65;`、`&# 65;` 都不是合法 entity），而且它的
+// 溢位行為要另外查 errno；這裡的規則只有一條：整段必須都是該進位的數字。
+[[nodiscard]] inline std::optional<char32_t> decodeNumericEntity(std::string_view numberPart,
+                                                                 bool hexEntity) {
+    if (numberPart.empty()) return std::nullopt;
+    unsigned long long value = 0;
+    for (const char c : numberPart) {
+        int digit = -1;
+        if (c >= '0' && c <= '9') digit = c - '0';
+        else if (hexEntity && c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+        else if (hexEntity && c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+        if (digit < 0) return std::nullopt;  // 尾端垃圾，例如 `&#12x3;`
+        value = value * (hexEntity ? 16ULL : 10ULL) + static_cast<unsigned long long>(digit);
+        if (value > 0x10FFFFULL) return std::nullopt;  // 提早停，長數字不會繞回
+    }
+    if (value == 0) return std::nullopt;                       // NUL 不是可顯示內容
+    if (value >= 0xD800 && value <= 0xDFFF) return std::nullopt;  // surrogate 不是 scalar value
+    return static_cast<char32_t>(value);
+}
+
 [[nodiscard]] inline std::string decodeEntities(std::string_view text) {
     std::string out;
     out.reserve(text.size());
@@ -1545,17 +1589,20 @@ inline void stripTagWithContent(std::string& html, const std::string& tagLower) 
         else if (entity == "apos") out += '\'';
         else if (entity == "nbsp") out += ' ';
         else if (!entity.empty() && entity.front() == '#') {
-            // 數字實體。非 ASCII 範圍的字元交給後續的 ASCII 掃描明確擋下，
-            // 這裡不做任何猜測性的轉寫（例如轉音譯或問號）。
+            // 數字實體。`&#20013;` 與直接寫 UTF-8 的「中」是同一個字元的兩種
+            // 合法寫法，所以這裡把 scalar value 編成 UTF-8，交給下游的字型
+            // 涵蓋率檢查決定畫不畫得出來——不是在這裡先判死。
+            // 不合法者（surrogate、超出 U+10FFFF、空數字、尾端垃圾）才標記成
+            // 0xFF：那是刻意的無效 UTF-8，讓 createPdfFromPlainText 明確失敗，
+            // 而不是靜默吐出一個看起來沒問題但缺字的 PDF。
             const std::string_view digits = entity.substr(1);
-            bool hexEntity = !digits.empty() && (digits.front() == 'x' || digits.front() == 'X');
+            const bool hexEntity = !digits.empty() && (digits.front() == 'x' || digits.front() == 'X');
             const std::string_view numberPart = hexEntity ? digits.substr(1) : digits;
-            char* end = nullptr;
-            const long value = std::strtol(std::string(numberPart).c_str(), &end, hexEntity ? 16 : 10);
-            if (value > 0 && value < 128) {
-                out.push_back(static_cast<char>(value));
+            const std::optional<char32_t> scalar = decodeNumericEntity(numberPart, hexEntity);
+            if (scalar) {
+                appendUtf8(out, *scalar);
             } else {
-                out.push_back(static_cast<char>(0xFF));  // 明確標記為不可表示，後續 ASCII 掃描會擋下
+                out.push_back(static_cast<char>(0xFF));  // 明確標記為不可表示，後續驗證會擋下
             }
         } else {
             // 未知具名實體：原樣保留（含 & 與 ;），比猜測性刪除更不容易

@@ -52,7 +52,7 @@ PRD §13 的完成定義是「217 條範圍內需求逐條勾稽，每條有對�
 | PRD-VIEW-010 | **Thin Lines**：所有註解線條以 1 像素顯示 | M | R1 | 部分 | 檢視期覆寫線寬在預編譯 PDFium 上不可行（沒有對應旗標，實測見 exceptions/EXC_20260906_RD_SA_thin_lines_unsupported.md）；折衷是讓線寬 0（PDF 規格的裝置最細線）成為屬性面板的合法選項，使用者自己畫的線因此永遠看得見 |
 | PRD-VIEW-011 | **Ribbon Layout**：頁面左右排列 | S | R1 | 完成 | Ribbon Layout（頁面左右排列）：同列相鄰、不等高垂直置中、座標往返自洽、RTL 反向，`tests/test_horizontal_layout.cpp` 10 例；已接上檢視選單與 Ribbon 版面群組 |
 | PRD-VIEW-012 | **右至左版面** | S | R1 | 完成 | 右至左版面，`rightToLeftSwapsVisualOrderNotPageOrder` |
-| PRD-VIEW-013 | Stroke Adjust 渲染選項 | C | R2 | 部分 | Stroke Adjust 對映到 FPDF_RENDER_NO_SMOOTHPATH（近似而非規格等價，已在標頭寫明限制），另補灰階與關閉平滑化旗標；尚未接上檢視選單 |
+| PRD-VIEW-013 | Stroke Adjust 渲染選項 | C | R2 | 部分 | Stroke Adjust 對映到 FPDF_RENDER_NO_SMOOTHPATH（近似而非規格等價，已在標頭寫明限制），另補灰階與關閉平滑化旗標。已接上「檢視 → 顯示品質」四個項目並註冊為 Ribbon 動作；「平滑線條」與 strokeAdjust 是反向對映，連同「改了選項一定要作廢舊圖磚」由 tests/test_render_quality.cpp 釘住。仍是部分：近似不等於規格語意，工程圖上 0.1 pt 的線在低倍率下仍可能整條消失（取樣問題，不是抗鋸齒問題） |
 | PRD-VIEW-014 | 圖層攤平為基礎內容 | S | R2 | 完成 | 圖層攤平（ADR-003 的還款）：BDC/BMC/EMC 巢狀正確配對（DP/MP 不參與巢狀但仍受可見性判斷）、OCMD 的 /P 四種政策、XObject 自身的 /OC 與 Form XObject 遞迴、註解的 /OC 移除。以真正的 PdfiumEngine 渲染回讀驗證隱藏圖層真的消失而可見圖層不受影響——只驗位元組會漏掉「刪錯地方」。/VE 可見性運算式未求值：遇到時保守保留內容（寧可多顯示也不要少顯示，攤平後刪錯的救不回來）並回報，呼叫端必須把這個降級顯示給使用者 |
 | PRD-VIEW-015 | **尺規與參考線**（可從尺規拖出） | M | R1 | 完成 | 尺規（Ctrl+R）沿檢視上緣與左緣，以網格版面對齊檢視區原點（左上角留空格，否則兩把尺規的零點各差一個尺規厚度）；從尺規拖出參考線，放開才加入（拖曳中每格都加的話一次會產生幾十條）。刻度跟著捲動、縮放、換頁同步——對不準的尺規比沒有尺規更糟，使用者會照著它量。測試見 tests/viewaids/test_guides.cpp |
 | PRD-VIEW-016 | **格線與貼齊（Snapping）** | M | R1 | 完成 | 格線與貼齊（含物件邊緣、優先序）已接上主視窗：格線與參考線畫在頁面內容之上、選取之下，**不寫進 PDF**（畫進內容串流的話使用者列印或寄出時會多出一堆線，且不可逆）。四個開關分開而非合成一個「繪圖輔助」——貼齊是行為、格線是視覺提示，使用者常常只要其中一個。貼齊容差以點為單位而非像素，理由同命中容差。測試見 tests/viewaids/test_guides.cpp |
@@ -114,7 +114,7 @@ PRD §13 的完成定義是「217 條範圍內需求逐條勾稽，每條有對�
 | PRD-ANN-025 | 清除距離註解的測量值 | S | R1 | 完成 | 清除量測值定義為清 /Contents 保留 /Measure 與幾何，見 tests/measure/test_measure_writer.cpp |
 | PRD-ANN-026 | 線→距離、多邊形→面積、折線→周長 轉換 | S | R1 | 完成 | 線→距離、多邊形→面積、折線→周長 轉換。量測工具已接上：第一次使用時先用剛拉的那條線校正比例尺（那條線本身不寫成註解——它是一把尺，不是一則量測），之後沿用。未校正時**不寫出一個看似合理的假數字**，而是先問。轉換與未校正的失敗路徑見 tests/measure/test_measurement_service.cpp |
 | PRD-ANN-027 | **量測結果匯出 CSV** | M | R1 | 完成 | 量測 CSV 匯出，含比例與單位；RFC 4180 跳脫與回讀見 tests/measure/test_measurement_service.cpp |
-| PRD-ANN-028 | **註解摘要（Summarize Comments）** | M | R1 | 部分 | 「僅摘要」（純文字）與「文件加摘要」（每頁後插入該頁摘要頁，產生新檔不動原檔）皆已接上「註解 → 摘要註解」選單。插入走新增的 interleavePagesFrom：收下原始頁碼、一次算完順序、整份只重寫一次——逐次插入會位移且是每頁一次全檔重寫。摘要頁的分頁靠 layoutPlainText 新增的 \f 支援。並排版面未做（需要把兩頁縮排到同一頁的合成，與插頁不是同一條路徑）；摘要文字目前限 ASCII（標準 14 字型），非 ASCII 會明確失敗而不是靜默丟字 |
+| PRD-ANN-028 | **註解摘要（Summarize Comments）** | M | R1 | 部分 | 「僅摘要」（純文字）與「文件加摘要」（每頁後插入該頁摘要頁，產生新檔不動原檔）皆已接上「註解 → 摘要註解」選單。插入走新增的 interleavePagesFrom：收下原始頁碼、一次算完順序、整份只重寫一次——逐次插入會位移且是每頁一次全檔重寫。摘要頁的分頁靠 layoutPlainText 新增的 \f 支援。中文摘要已可用：走 ADR-007 的內嵌思源黑體子集，內嵌字型不在時明確失敗而不是靜默丟字——空白的摘要頁會被誤讀成「這頁沒有註解」。服務層入口的插入位置、CJK 與空白摘要三條路徑見 tests/pageops/test_summary_pages.cpp。仍是部分：並排版面未做（需要把兩頁縮排到同一頁的合成，與插頁不是同一條路徑） |
 | PRD-ANN-029 | **Comment Styles 樣式面板** | M | R1 | 完成 | Comment Styles：只搬顏色／內部色／透明度／邊框，明確不動內容、作者、位置、旗標與幾何。測試見 tests/annmgmt/test_annotation_tools.cpp |
 | PRD-ANN-030 | Fit Box by Text Content（文字框自動貼合內容） | S | R1 | 完成 | Fit Box by Text Content 兩種模式：預設維持左上錨點調整高度（寬度未設時一併調整）；fixedBox 時高度不動、改成逐級縮字直到塞得下——框已經是使用者拖出來的大小，撐高會蓋掉他剛刻意避開的內容。每一級都重新換行（字小了可能少斷一行，按比例換算會系統性縮過頭）。縮到 minFontSize 仍塞不下時回報 overflows，不靜默裁字 |
 | PRD-ANN-031 | 註解段落屬性編輯（行距、對齊、縮排） | S | R2 | 完成 | 註解段落屬性：行距（係數而非點數——存絕對點數會讓使用者每次改字級都要重調一次）與縮排的引擎能力完成，並接上註解屬性側邊欄；段落屬性只對 FreeText 家族有意義，其他型別整列隱藏而非灰掉——灰掉的控制項會讓使用者一直在找怎麼啟用它 |
@@ -237,7 +237,7 @@ PRD §13 的完成定義是「217 條範圍內需求逐條勾稽，每條有對�
 | PRD-ENH-001 | 新增背景 | S | R2 | 完成 | 頁面背景：純色與影像、Fit/Fill/Stretch、九宮格對齊、留白、旋轉、透明度；插在既有內容之前。測試見 tests/enhance/test_enhance_pdf.cpp |
 | PRD-ENH-002 | 掃描頁去斜（Deskew）與增強 | S | R2 | 完成 | 去斜（投影剖面法，±15 度內）與對比／亮度／灰階／Otsu 二值化；整頁重新點陣化，既有文字層會被光柵化。測試見 tests/enhance/test_scan_enhance.cpp 與 tests/enhance/test_image_ops.cpp |
 | PRD-ENH-003 | 頁面點陣化（Rasterize） | S | R2 | 完成 | 指定 dpi 點陣化，/Annots 與 /Rotate 不動，DCT/Flate/Auto 三種編碼。測試見 tests/enhance/test_enhance_pdf.cpp |
-| PRD-ENH-004 | 影像重壓縮 | S | R2 | 部分 | 影像重壓縮：DCT/Flate、8-bit Gray/RGB、/SMask 併回；targetDpi 重取樣未實作，索引色／CMYK／CCITT 回報不支援 |
+| PRD-ENH-004 | 影像重壓縮 | S | R2 | 部分 | 影像重壓縮：DCT/Flate、8-bit Gray/RGB。目前不重取樣、尺寸不變，因此 /SMask 與間接 /Mask 原樣保留（不是併回 alpha 再輸出）——遮罩必須與主影像同尺寸，重取樣一旦實作就得連遮罩一起處理，見 src/engine/enhance/image_recompressor.h。targetDpi 重取樣未實作，索引色／CMYK／CCITT 回報不支援 |
 | PRD-ENH-005 | 檢視／編輯文件屬性 | M | R1 | 完成 | 文件屬性對話框，含不支援項目的降級說明；tests/test_document_properties_dialog.cpp 驗 XFA 與 JavaScript 的降級文字真的出現，且普通文件不出現多餘警告——把警告常態化，使用者就不再讀它了 |
 | PRD-ENH-006 | 色彩轉換與 Recolor | S | R3 | 部分 | 色彩轉換：灰階／去飽和／指定色替換，涵蓋影像與內容串流的裝置色運算子（g/G/rg/RG/k/K/sc/scn）。**未涵蓋** Separation/DeviceN（需要色調轉換函式的直譯器）、ICCBased/Indexed、以及 /ExtGState 的混合模式，未涵蓋的部分會計入報告的 skipped 計數而非靜默略過 |
 | PRD-ENH-007 | 新增條碼 | C | R3 | 部分 | Code 128 自繪向量條碼（編碼正確性以已知參考編碼比對，不只驗有畫出東西）；QR 未做，糾錯碼與遮罩選擇的複雜度與本工作包其餘部分相當 |

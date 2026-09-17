@@ -17,7 +17,12 @@ alioth_add_test(test_page_overlay test_page_overlay.cpp pageops_fixture.h pageop
     pageops_render.h)
 alioth_add_test(test_page_boxes test_page_boxes.cpp pageops_fixture.h pageops_readback.h)
 
-foreach(_target test_page_merge test_page_overlay test_page_boxes)
+# 「文件加摘要」走應用層的服務入口（PRD-ANN-028）：底層排版支援中文之後，
+# 還要確認摘要這條路徑沒有自己再擋一次非 ASCII。
+set(ALIOTH_TEST_LIBS ${ALIOTH_TEST_LIBS} Alioth::app Alioth::fonts)
+alioth_add_test(test_summary_pages test_summary_pages.cpp pageops_fixture.h pageops_readback.h)
+
+foreach(_target test_page_merge test_page_overlay test_page_boxes test_summary_pages)
     target_include_directories(${_target} PRIVATE ${CMAKE_SOURCE_DIR}/tests)
     set_property(TEST ${_target} APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
     # qpdf 的位置由建置期常數提供；沒有它結構檢查只會 skip，而 skip 掉的檢查等於沒檢查。

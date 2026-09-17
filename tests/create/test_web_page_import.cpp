@@ -9,7 +9,9 @@
 #include <QTemporaryDir>
 #include <QtTest>
 
+#include <array>
 #include <string>
+#include <string_view>
 
 #include "create_test_support.h"
 #include "domain/document_source.h"
@@ -140,6 +142,88 @@ private slots:
         const auto opened = alioth::test::create::openWithPdfium(path);
         QVERIFY2(opened.ok, opened.detail.toUtf8().constData());
         ALIOTH_REQUIRE_QPDF_CLEAN(path, QStringLiteral("含 CJK 的網頁匯入"));
+    }
+
+    void numericEntitiesDecodeToUtf8() {
+        // `&#20013;`、`&#x4E2D;` 與直接寫 UTF-8 的「中」是同一個字元的三種
+        // 合法寫法，擷取結果必須逐位元組相同。曾經只有第三種能用，前兩種
+        // 會被換成單一 0xFF，然後在排版階段被判為無效 UTF-8。
+        const std::string expected = "\xE4\xB8\xAD";
+        const HtmlExtraction decimal = extractReadableText("<html><body><p>&#20013;</p></body></html>");
+        QVERIFY2(decimal.ok, decimal.diagnostic.c_str());
+        QCOMPARE(decimal.bodyText, expected);
+
+        const HtmlExtraction hexLower = extractReadableText("<html><body><p>&#x4e2d;</p></body></html>");
+        QVERIFY2(hexLower.ok, hexLower.diagnostic.c_str());
+        QCOMPARE(hexLower.bodyText, expected);
+
+        const HtmlExtraction hexUpper = extractReadableText("<html><body><p>&#X4E2D;</p></body></html>");
+        QVERIFY2(hexUpper.ok, hexUpper.diagnostic.c_str());
+        QCOMPARE(hexUpper.bodyText, expected);
+
+        const HtmlExtraction literal =
+            extractReadableText("<html><body><p>\xE4\xB8\xAD</p></body></html>");
+        QVERIFY2(literal.ok, literal.diagnostic.c_str());
+        QCOMPARE(literal.bodyText, expected);
+    }
+
+    void supplementaryPlaneEntityDecodesToFourBytes() {
+        // U+20000（CJK 擴充 B）。四位元組序列的編碼分支與 BMP 不同，
+        // 而且錯了的症狀是「多數字元都對，只有罕用字壞掉」。
+        // 只驗解碼；這個字是否在內嵌子集裡由字型涵蓋率檢查決定。
+        const HtmlExtraction extraction =
+            extractReadableText("<html><body><p>&#x20000;</p></body></html>");
+        QVERIFY2(extraction.ok, extraction.diagnostic.c_str());
+        QCOMPARE(extraction.bodyText, std::string("\xF0\xA0\x80\x80"));
+    }
+
+    void illegalNumericEntitiesRemainInvalidUtf8() {
+        // 不合法的數字 entity 不可以被「修好」成某個看起來合理的字元：
+        // 那會讓輸出的 PDF 與原網頁內容不同，而使用者不會發現。
+        // 規則是留下 0xFF，讓後續的 UTF-8 驗證明確失敗。
+        const std::array<std::string_view, 5> cases = {
+            "&#xD800;",     // surrogate 不是 scalar value
+            "&#0;",         // NUL
+            "&#;",          // 空數字
+            "&#12x3;",      // 尾端垃圾
+            "&#x110000;",   // 超過 U+10FFFF
+        };
+        for (const std::string_view bad : cases) {
+            const std::string html =
+                "<html><body><p>" + std::string(bad) + "</p></body></html>";
+            const HtmlExtraction extraction = extractReadableText(html);
+            QVERIFY2(extraction.ok, extraction.diagnostic.c_str());
+            QVERIFY2(extraction.bodyText.find('\xFF') != std::string::npos,
+                     std::string("未標記為不可表示：").append(bad).c_str());
+
+            WebPageToPdfConverter converter(constantFetcher(htmlResponse(html)));
+            const WebPageImportResult result = converter.convert("https://example.invalid/bad.html");
+            QVERIFY2(!result.ok, std::string("不合法 entity 竟然轉檔成功：").append(bad).c_str());
+        }
+    }
+
+    void decimalEntityCjkPageConvertsEndToEnd() {
+        // 端到端：純數字 entity 的中文網頁要能產出內嵌 CJK 子集的 PDF。
+        const std::string html =
+            "<html><head><title>&#20013;&#25991;</title></head>"
+            "<body><p>&#x4E2D;&#x6587;&#x5167;&#x5BB9;</p></body></html>";
+        WebPageToPdfConverter converter(constantFetcher(htmlResponse(html)));
+        const WebPageImportResult result = converter.convert("https://example.invalid/entity.html");
+
+        if (!alioth::engine::fonts::CjkFontLibrary::instance().available()) {
+            QVERIFY(!result.ok);
+            return;
+        }
+
+        QVERIFY2(result.ok, result.diagnostic.c_str());
+        QCOMPARE(result.pageTitle, std::string("\xE4\xB8\xAD\xE6\x96\x87"));
+        QVERIFY(result.bytes.find("/CJK") != std::string::npos);
+
+        const QString path = alioth::test::create::writeBytes(
+            dir_->path(), QStringLiteral("webpage_entity_cjk.pdf"), result.bytes);
+        const auto opened = alioth::test::create::openWithPdfium(path);
+        QVERIFY2(opened.ok, opened.detail.toUtf8().constData());
+        ALIOTH_REQUIRE_QPDF_CLEAN(path, QStringLiteral("數字 entity 的 CJK 網頁匯入"));
     }
 
 private:

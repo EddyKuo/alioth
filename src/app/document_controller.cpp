@@ -60,6 +60,10 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
     path_ = path;
     viewportGeneration_.cancelAll();
     viewportGeneration_.reset();
+    // 換文件：上一份還在佇列裡的縮圖不可以畫進新文件的面板上——
+    // 頁碼同樣合法，畫進去不會有任何錯誤，只會顯示上一份文件的內容。
+    thumbnailGeneration_.cancelAll();
+    thumbnailGeneration_.reset();
     ++renderGeneration_;
     ++documentGeneration_;
     cache_.clear();
@@ -96,6 +100,8 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
 
 void DocumentController::closeDocument() {
     viewportGeneration_.cancelAll();
+    thumbnailGeneration_.cancelAll();
+    thumbnailGeneration_.reset();
     ++renderGeneration_;
     ++documentGeneration_;
     cache_.clear();
@@ -400,7 +406,7 @@ const std::vector<domain::LinkTarget>& DocumentController::linksForPage(
 void DocumentController::requestThumbnail(std::int32_t pageIndex, std::int32_t maxEdgePixels) {
     if (!open_) return;
     engine_->renderThumbnail(
-        pageIndex, maxEdgePixels, viewportGeneration_.token(),
+        pageIndex, maxEdgePixels, thumbnailGeneration_.token(),
         [this, pageIndex](engine::RenderResult result) {
             if (!result.ok()) return;
             // 縮圖不進圖磚快取（鍵的語意不同），這裡直接複製一份成 QImage 交給 UI。

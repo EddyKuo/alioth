@@ -186,6 +186,13 @@ private:
     std::unique_ptr<engine::PdfiumEngine> engine_;
     engine::TileCache cache_;
     engine::CancellationSource viewportGeneration_;
+    // 縮圖有自己的取消來源，**不能**跟可視區共用。
+    //
+    // 共用的話，開檔時排的那一批縮圖會在檢視區第一次排版（開檔後幾毫秒）
+    // 就被 scheduleTiles 的 cancelAll() 清光——縮圖面板於是只剩第一頁，
+    // 而且沒有任何錯誤訊息。縮圖該在換文件時取消，不該在捲動時取消：
+    // 捲動頁面與「縮圖面板還要不要第 7 頁」完全無關。
+    engine::CancellationSource thumbnailGeneration_;
     engine::RenderOptions renderOptions_{};
     std::uint64_t renderGeneration_{0};  // Accessed only on the controller's thread.
 

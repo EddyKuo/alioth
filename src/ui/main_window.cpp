@@ -24,6 +24,7 @@
 #include <QLineEdit>
 #include <QIcon>
 #include <QListWidget>
+#include <QScrollBar>
 #include <QPixmap>
 #include <QTreeWidget>
 #include <QCloseEvent>
@@ -132,6 +133,12 @@ namespace {
 // QMainWindow::saveState / restoreState 的版本號。
 // 面板預設版面有破壞性變更時 +1，舊的 windowState 會被 Qt 拒絕還原。
 constexpr int kWindowStateVersion = 2;
+
+// 縮圖的圖示尺寸與格線尺寸。格線要比圖示大一圈，容得下頁碼那一行與外框，
+// 否則文字會被裁掉或壓在圖上。兩個常數放在一起，是因為它們必須一起改：
+// 只改其中一個，項目不是被裁就是格子之間出現一條用不到的空白。
+const QSize kThumbnailIconSize{120, 160};
+const QSize kThumbnailGridSize{140, 196};
 
 }  // namespace
 
@@ -1586,10 +1593,24 @@ void MainWindow::buildDockPanels() {
     thumbnailList_->setAccessibleName(tr("頁面縮圖"));
     thumbnailList_->setAccessibleDescription(tr("方向鍵選頁，Enter 跳到該頁"));
     thumbnailList_->setViewMode(QListView::IconMode);
-    thumbnailList_->setIconSize(QSize(120, 160));
+    thumbnailList_->setIconSize(kThumbnailIconSize);
     thumbnailList_->setResizeMode(QListView::Adjust);
     thumbnailList_->setMovement(QListView::Static);
     thumbnailList_->setSpacing(6);
+    // 固定格線尺寸，而且必須固定。
+    //
+    // 少了它，項目的大小取決於「圖示到了沒有」：剛建立時是一個只有頁碼的
+    // 小方塊，縮圖非同步到達之後才撐成 120×160。IconMode 的版面是在項目
+    // **加入時**算好位置並快取的，之後圖示改變並不會重算已經排好的那些——
+    // 於是每一張縮圖都畫在當初那個小方塊的位置上，整批疊成左上角一團。
+    //
+    // 畫面上看起來就是「只有第一頁，其他頁都不見了」：實際上 40 個項目都在，
+    // 只是全部重疊。這個缺陷沒有任何錯誤訊息，count() 也完全正常——
+    // 只有把畫面抓下來看才發現得了。
+    thumbnailList_->setGridSize(kThumbnailGridSize);
+    // 每一格一樣大，讓 Qt 走最快的版面路徑，也讓上面那個假設永遠成立。
+    thumbnailList_->setUniformItemSizes(true);
+    thumbnailList_->setWordWrap(false);
     // 拖曳重排（PRD-NAV-004）。InternalMove 讓 Qt 負責拖放的視覺回饋，
     // 我們只在放開時把「從哪到哪」換成一次頁面移動操作。
     thumbnailList_->setDragDropMode(QAbstractItemView::InternalMove);
@@ -1598,6 +1619,11 @@ void MainWindow::buildDockPanels() {
     connect(thumbnailList_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row >= 0 && !reorderingThumbnails_) navigateToPage(row);
     });
+
+    // 捲到哪就補要哪幾張縮圖。掛在捲軸而不是 paintEvent：paintEvent 在
+    // 每一次重繪都會進來，而重繪的次數遠多於「看得到的範圍變了」的次數。
+    connect(thumbnailList_->verticalScrollBar(), &QScrollBar::valueChanged, this,
+            [this](int) { requestVisibleThumbnails(); });
 
     // QListWidget 在內部搬移之後才發出 rowsMoved。用它而不是攔截 dropEvent：
     // 攔截 drop 得自己算出目標索引，而 Qt 的計算會因為 IconMode 的排列方向
@@ -4381,6 +4407,7 @@ void MainWindow::populateOutline() {
 
 void MainWindow::populateThumbnails() {
     thumbnailList_->clear();
+    requestedThumbnails_.clear();
     const int pages = controller_->pageCount();
     for (int i = 0; i < pages; ++i) {
         auto* item = new QListWidgetItem(tr("%1").arg(i + 1), thumbnailList_);
@@ -4389,8 +4416,52 @@ void MainWindow::populateThumbnails() {
 
     // 只先要看得到的那幾張。整份文件一次要縮圖，在一萬頁的文件上等於自殺——
     // 縮圖任務即使是最低優先權，也會把佇列塞滿並延後可見圖磚。
-    const int initial = std::min(pages, 24);
-    for (int i = 0; i < initial; ++i) {
+    requestVisibleThumbnails();
+}
+
+void MainWindow::requestVisibleThumbnails() {
+    if (thumbnailList_ == nullptr || !controller_->isOpen()) return;
+    const int count = thumbnailList_->count();
+    if (count == 0) return;
+
+    // 捲到哪就要到哪。先前只在開檔時要前 24 張，之後再也沒有人補——
+    // 一份 40 頁的文件，第 25 頁之後**永遠**只有一個頁碼，沒有縮圖，
+    // 而使用者不會知道那是還沒載入還是壞了。
+    const QRect viewport = thumbnailList_->viewport()->rect();
+
+    // 可見範圍由捲軸位置與格線幾何推算，不用 indexAt。
+    //
+    // indexAt 在這個清單上不可靠：捲到底之後它仍然回報第 0 列（IconMode 的
+    // 空間索引與捲動位移在這個組態下對不起來），而那會讓「補要縮圖」永遠
+    // 只補開頭那幾張——症狀與完全沒補一模一樣。
+    //
+    // 幾何算法則是確定的：格子大小是我們自己設的，捲軸位置是像素。
+    const int spacing = thumbnailList_->spacing();
+    const int cellWidth = std::max(1, kThumbnailGridSize.width() + 2 * spacing);
+    const int cellHeight = std::max(1, kThumbnailGridSize.height() + 2 * spacing);
+    const int columns = std::max(1, viewport.width() / cellWidth);
+    const int rows = viewport.height() / cellHeight + 2;  // +2：半露的頭尾兩列
+    const int visibleCount = std::max(1, columns * rows);
+
+    const QScrollBar* bar = thumbnailList_->verticalScrollBar();
+    // 捲動模式決定 value 的單位：ScrollPerItem 時它就是列號，
+    // ScrollPerPixel 時是像素。搞錯的話一份長文件會整個算歪。
+    const int firstRow = thumbnailList_->verticalScrollMode() == QAbstractItemView::ScrollPerItem
+                             ? bar->value()
+                             : bar->value() / cellHeight;
+    const int first = std::clamp(firstRow * columns, 0, count - 1);
+
+    // 前後各多要一些：使用者捲動時縮圖要已經在那裡，等捲到了才開始渲染
+    // 就是一路空白跟著游標跑。
+    constexpr int kLookahead = 8;
+    const int from = std::max(0, first - kLookahead);
+    const int to = std::min(count - 1, first + visibleCount + kLookahead);
+
+    for (int i = from; i <= to; ++i) {
+        // 已經要過的不再要一次：捲動是連續事件，不去重的話同一頁會被
+        // 排進佇列幾十次，而那條 PDFium 執行緒是全行程唯一的一條。
+        if (requestedThumbnails_.contains(i)) continue;
+        requestedThumbnails_.insert(i);
         controller_->requestThumbnail(i);
     }
 }

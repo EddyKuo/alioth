@@ -730,6 +730,16 @@ void PdfiumEngine::outline(std::function<void(std::vector<domain::OutlineNode>)>
     });
 }
 
+// 縮圖**不可**被 discardPending 丟掉。
+//
+// scheduleTiles 每次可視區變動都會 discardPending(Prefetch)，而那個條件是
+// 「優先權數值 >= Prefetch」——Thumbnail 數值更大，所以一併中彈。
+// 後果是開檔之後縮圖面板只剩第一頁：開檔時排的那一批縮圖，在檢視區第一次
+// 排版（也就是開檔後的幾毫秒內）就被清光，只有已經開始渲染的那一兩張活下來。
+// 沒有任何錯誤訊息，而使用者看到的是「其他頁都不見了」。
+//
+// 與 pageInfo 同一個坑，同一個修法（見上方 pageInfo 的說明）。取消仍然做得到，
+// 但要由呼叫端用自己的權杖決定——縮圖該在換文件時取消，不該在捲動時取消。
 void PdfiumEngine::renderThumbnail(std::int32_t pageIndex, std::int32_t maxEdgePixels,
                                    CancellationToken token, RenderCallback callback) {
     impl_->enqueue(
@@ -783,7 +793,8 @@ void PdfiumEngine::renderThumbnail(std::int32_t pageIndex, std::int32_t maxEdgeP
                 result.cancelled = true;
                 callback(std::move(result));
             }
-        });
+        },
+        /*discardable=*/false);
 }
 
 void PdfiumEngine::withDocument(std::function<void(void*)> work) {

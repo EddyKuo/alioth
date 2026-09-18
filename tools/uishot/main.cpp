@@ -17,6 +17,7 @@
 
 #include <QApplication>
 #include <QDockWidget>
+#include <QListWidget>
 #include <QMenuBar>
 #include <QPixmap>
 #include <QTimer>
@@ -40,6 +41,17 @@ void dumpLayout(const alioth::ui::MainWindow& window) {
                     rect.width(), rect.height());
     }
     std::printf("menubar visible=%d\n", window.menuBar()->isVisible() ? 1 : 0);
+
+    // 縮圖清單的實況：有幾個項目、其中幾個真的拿到圖。
+    // 「有 100 個項目但只有 1 個有圖」與「只有 1 個項目」在畫面上很像，
+    // 但成因完全不同，光看截圖分不出來。
+    if (const auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"))) {
+        int withIcon = 0;
+        for (int i = 0; i < list->count(); ++i) {
+            if (!list->item(i)->icon().isNull()) ++withIcon;
+        }
+        std::printf("thumbnails items=%d withIcon=%d\n", list->count(), withIcon);
+    }
 }
 
 }  // namespace
@@ -51,7 +63,7 @@ int main(int argc, char** argv) {
 
     const QStringList args = QApplication::arguments();
     if (args.size() < 2) {
-        std::fprintf(stderr, "用法: alioth_uishot <輸出.png> [寬 高]\n");
+        std::fprintf(stderr, "用法: alioth_uishot <輸出.png> [寬 高] [文件.pdf]\n");
         return 2;
     }
     const QString output = args.at(1);
@@ -73,6 +85,10 @@ int main(int argc, char** argv) {
         height = h;
     }
 
+    // 可選：開一份文件再截圖。面板的問題（縮圖只剩一頁、書籤是空的）
+    // 在沒有文件的空視窗上完全看不到——那正是最容易漏掉的一類。
+    const QString document = args.size() >= 5 ? args.at(4) : QString();
+
     alioth::ui::MainWindow window;
     window.resize(width, height);
     window.show();
@@ -80,7 +96,13 @@ int main(int argc, char** argv) {
     // 讓版面跑完一輪事件迴圈再抓圖：QWidget::grab 在第一次 show 之後、
     // 版面尚未生效之前抓到的是還沒排好的幾何。
     int exitCode = 0;
-    QTimer::singleShot(0, &app, [&] {
+    if (!document.isEmpty()) window.openPath(document);
+
+    // 開檔是非同步的（引擎執行緒），縮圖又比開檔晚一步。固定等一段時間
+    // 而不是等訊號：這支工具的用途是「看畫面長什麼樣」，而畫面包含
+    // 「載入到一半」那個狀態——等訊號會把它藏起來。
+    const int delayMs = document.isEmpty() ? 0 : 3000;
+    QTimer::singleShot(delayMs, &app, [&] {
         dumpLayout(window);
         const QPixmap shot = window.grab();
         if (!shot.save(output)) {

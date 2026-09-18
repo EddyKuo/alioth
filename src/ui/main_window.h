@@ -5,6 +5,7 @@
 
 #include <QColor>
 #include <QMainWindow>
+#include <QSet>
 #include <QString>
 
 #include "app/annotation_service.h"
@@ -239,6 +240,8 @@ private:
     void updateWindowTitle(const QString& path);
     void populateOutline();
     void populateThumbnails();
+    // 依縮圖面板目前看得到的範圍補要縮圖。捲動時呼叫。
+    void requestVisibleThumbnails();
     void runSearch();
     void populateAnnotations();
 
@@ -409,6 +412,8 @@ private:
     QLabel* noticeLabel_{nullptr};
     QTreeWidget* outlineTree_{nullptr};
     QListWidget* thumbnailList_{nullptr};
+    // 已經送出過請求的頁。捲動是連續事件，不去重的話同一頁會被排進佇列幾十次。
+    QSet<int> requestedThumbnails_;
     QListWidget* searchResults_{nullptr};
     QListWidget* annotationList_{nullptr};
     QComboBox* annotationAuthorFilter_{nullptr};

@@ -147,6 +147,11 @@ set_property(TEST test_highlight_flow APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::engine Alioth::app Alioth::ui)
 alioth_add_test(test_ui_smoke test_ui_smoke.cpp pdf_fixture.h)
 set_property(TEST test_ui_smoke APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# 縮圖面板（PRD-NAV-004）。回報的症狀是「開啟 PDF 之後左側只看得到第一頁」。
+alioth_add_test(test_thumbnail_panel test_thumbnail_panel.cpp pdf_fixture.h)
+set_property(TEST test_thumbnail_panel APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # 選取註解工具（對標 PDF-XChange 的 Select Comments Tool）。
 alioth_add_test(test_comment_selection_tool test_comment_selection_tool.cpp)
 set_property(TEST test_comment_selection_tool APPEND PROPERTY

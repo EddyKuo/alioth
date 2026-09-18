@@ -15,6 +15,7 @@ constexpr const char* kAutosaveKey = "io/autosaveSeconds";
 constexpr const char* kAuthorKey = "annotation/author";
 constexpr const char* kNightModeKey = "view/nightMode";
 constexpr const char* kRecentKey = "io/recentFiles";
+constexpr const char* kTrustedCertsKey = "signature/trustedCertificateFiles";
 constexpr const char* kCursorSizeKey = "view/cursorSizeLevel";
 constexpr const char* kLocaleKey = "ui/locale";
 constexpr const char* kStickyToolsKey = "ui/stickyTools";
@@ -164,6 +165,19 @@ void Settings::setExternalTools(const std::vector<ExternalTool>& tools) {
         settings.setValue(QStringLiteral("workingDirectory"), tools[i].workingDirectory);
     }
     settings.endArray();
+}
+
+QStringList Settings::trustedCertificateFiles() const {
+    QSettings settings;
+    // 刻意**不**過濾掉不存在的路徑（與最近檔案相反）。信任是一個決定，
+    // 而決定不該因為一次換機器就無聲消失——使用者需要看到「這一張現在
+    // 找不到了」，才知道自己的驗證結果為什麼變了。
+    return settings.value(kTrustedCertsKey).toStringList();
+}
+
+void Settings::setTrustedCertificateFiles(const QStringList& paths) {
+    QSettings settings;
+    settings.setValue(kTrustedCertsKey, paths);
 }
 
 QStringList Settings::recentFiles() const {

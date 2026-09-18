@@ -11,6 +11,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 
 #include <memory>
 #include <vector>
@@ -42,7 +43,19 @@ public:
 
     // 信任存放區。空的存放區代表「什麼都不信任」，結果會是黃燈而不是綠燈——
     // 那是正確的預設：憑空信任一條無法回溯的憑證鏈比報錯更危險。
-    [[nodiscard]] engine::signature::TrustStore& trustStore() noexcept { return trust_; }
+    [[nodiscard]] engine::signature::TrustStore& trustStore() noexcept { return *trust_; }
+
+    struct TrustLoadResult {
+        int loaded{0};
+        QStringList failed;  // 讀不到或不是憑證的路徑，原樣回報
+    };
+
+    // 依路徑清單重建信任存放區（PDF-XChange 的 Digital IDs）。
+    //
+    // 每次都重建一個新的 TrustStore 而不是往舊的上面加：X509_STORE 沒有
+    // 「移除一張憑證」的合理途徑，而使用者按下「移除」之後如果那張憑證
+    // 仍然生效，他會得到一個與畫面相反的驗證結果——那比功能沒做更糟。
+    TrustLoadResult reloadTrustStore(const QStringList& certificateFiles);
 
     // 簽署一份文件（PRD-SIG-004）。
     //
@@ -95,7 +108,10 @@ signals:
 
 private:
     std::unique_ptr<engine::signature::SignatureScanner> scanner_;
-    engine::signature::TrustStore trust_;
+    // unique_ptr 而不是值：X509_STORE 沒有「移除一張憑證」的合理途徑，
+    // 所以「使用者移除了一張」只能靠整個換一個新的存放區。
+    std::unique_ptr<engine::signature::TrustStore> trust_{
+        std::make_unique<engine::signature::TrustStore>()};
     std::vector<engine::signature::SignatureReport> reports_;
     bool open_{false};
     bool verifying_{false};

@@ -84,7 +84,8 @@ Layout defaultLayout() {
                        {small("session.save", "儲存工作階段"),
                         small("session.restore", "復原工作階段"),
                         small("app.preferences", "偏好設定"),
-                        small("app.manageSettings", "管理設定")}),
+                        small("app.manageSettings", "管理設定"),
+                        small("file.auditSpace", "空間使用稽核")}),
              }),
 
         page("home", "常用", "H",
@@ -212,6 +213,7 @@ Layout defaultLayout() {
                  group("protect.signature", "簽章",
                        {large("sign.digitalSign", "數位簽署"), small("sign.certify", "認證文件"),
                         small("sign.validate", "驗證簽章"), small("sign.timestamp", "時間戳記"),
+                        small("sign.digitalIds", "信任的憑證"),
                         small("sign.clearAll", "清除所有簽章欄位")}),
              }),
 

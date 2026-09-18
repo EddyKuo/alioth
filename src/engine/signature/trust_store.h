@@ -15,6 +15,17 @@
 
 namespace alioth::engine::signature {
 
+// 一張已載入憑證的摘要，供「憑證管理」畫面顯示。
+//
+// 只取三個欄位：主體、簽發者、到期日。使用者要判斷的是「這張是不是我以為
+// 的那一張」與「它過期了沒有」——指紋雖然是唯一識別，但沒有人會逐位元組
+// 比對一串十六進位。
+struct TrustedCertificate {
+    std::string subject;
+    std::string issuer;
+    std::string notAfter;  // ASN.1 時間的可讀形式
+};
+
 class TrustStore {
 public:
     TrustStore();
@@ -29,6 +40,12 @@ public:
     // 載入 OpenSSL 的預設憑證路徑。刻意做成明示呼叫而不是建構時自動載入：
     // 預設路徑在不同機器上內容不同，自動載入會讓「三平台結果一致」悄悄失效。
     [[nodiscard]] bool addDefaultPaths();
+
+    // 目前載入的憑證摘要。順序即載入順序。
+    //
+    // 沒有這個的話「憑證管理」畫面只能列出檔案路徑，而使用者無從確認
+    // 一個叫 ca.pem 的檔案裡到底是哪一張憑證。
+    [[nodiscard]] std::vector<TrustedCertificate> certificates() const;
 
     [[nodiscard]] std::size_t size() const noexcept;
     [[nodiscard]] bool empty() const noexcept { return size() == 0; }

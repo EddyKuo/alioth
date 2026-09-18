@@ -79,6 +79,7 @@
 #include "platform/atomic_file.h"
 #include <cstring>
 #include "app/uisystem/tab_title_model.h"
+#include "engine/objects/space_audit.h"
 #include "engine/create/image_to_pdf.h"
 #include "engine/create/markdown_to_pdf.h"
 #include "engine/create/text_to_pdf.h"
@@ -678,6 +679,12 @@ void MainWindow::buildActions() {
 
     // 設定的匯出／匯入／重設（PDF-XChange 的 File → Manage Settings）。
     // settings_profile 早就實作並測過，同樣缺的是入口。
+    // 空間使用稽核（PDF-XChange 的 Audit Space Usage）。
+    // 使用者問「這份 120 MB 的檔案是什麼占掉的」時，正打算把它寄出去。
+    auto* auditAction = fileMenu->addAction(tr("空間使用稽核(&U)..."));
+    registerRibbonAction(QStringLiteral("file.auditSpace"), auditAction);
+    connect(auditAction, &QAction::triggered, this, [this] { auditSpaceUsage(); });
+
     auto* manageSettingsMenu = fileMenu->addMenu(tr("管理設定(&G)"));
     registerRibbonAction(QStringLiteral("app.manageSettings"),
                          manageSettingsMenu->menuAction());
@@ -1060,6 +1067,14 @@ void MainWindow::buildActions() {
     protectMenu->addSeparator();
     // 清除所有簽章欄位（PDF-XChange 的 Clear all Signatures）。
     // 用途是拿一份簽過的文件當範本重走流程。
+    // 憑證管理（PDF-XChange 的 Digital IDs）。
+    //
+    // PRD §4.1 的立場是信任判斷三平台一致，所以刻意不讀作業系統的憑證存放區——
+    // 使用者信任哪幾張憑證，由這裡明確決定。
+    auto* digitalIdsAction = protectMenu->addAction(tr("信任的憑證(&D)..."));
+    registerRibbonAction(QStringLiteral("sign.digitalIds"), digitalIdsAction);
+    connect(digitalIdsAction, &QAction::triggered, this, [this] { manageTrustedCertificates(); });
+
     auto* clearSignaturesAction = protectMenu->addAction(tr("清除所有簽章欄位..."));
     registerRibbonAction(QStringLiteral("sign.clearAll"), clearSignaturesAction);
     connect(clearSignaturesAction, &QAction::triggered, this, [this] { clearAllSignatures(); });
@@ -4880,6 +4895,13 @@ void MainWindow::applySettings() {
 
     // PRD-UI-013：觸控模式把 Ribbon 按鈕放大到 44 CSS px 等效。
     if (ribbon_ != nullptr) ribbon_->setTouchMode(settings_->touchMode());
+
+    // 信任的根憑證。沒有這一行的話，使用者在「信任的憑證」裡加的東西
+    // 只會存進設定檔，下次啟動不生效——而畫面上仍然列著它，
+    // 於是「我明明信任了這張憑證，為什麼還是黃燈」。
+    if (signatures_ != nullptr) {
+        (void)signatures_->reloadTrustStore(settings_->trustedCertificateFiles());
+    }
 }
 
 void MainWindow::emailCurrentDocument() {
@@ -5046,6 +5068,150 @@ void MainWindow::createDocumentFromImages() {
     (void)writeAndOpenNewDocument(
         tr("從影像建立"), result.bytes,
         QFileInfo(sources.first()).completeBaseName() + QStringLiteral(".pdf"));
+}
+
+void MainWindow::manageTrustedCertificates() {
+    QDialog dialog(this);
+    dialog.setWindowTitle(tr("信任的憑證"));
+    dialog.setObjectName(QStringLiteral("trustedCertificatesDialog"));
+
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* hint = new QLabel(
+        tr("簽章驗證只信任這份清單裡的根憑證。\n"
+           "本程式刻意不讀作業系統的憑證存放區——那會讓同一份文件在不同平台上"
+           "得到不同的驗證結果。"),
+        &dialog);
+    hint->setWordWrap(true);
+    layout->addWidget(hint);
+
+    auto* list = new QListWidget(&dialog);
+    list->setObjectName(QStringLiteral("trustedCertificatesList"));
+    list->setAccessibleName(tr("信任的憑證"));
+    layout->addWidget(list, 1);
+
+    auto* detail = new QLabel(&dialog);
+    detail->setObjectName(QStringLiteral("trustedCertificateDetail"));
+    detail->setAccessibleName(tr("憑證內容"));
+    detail->setWordWrap(true);
+    detail->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    layout->addWidget(detail);
+
+    QStringList paths = settings_->trustedCertificateFiles();
+
+    // 每次重建清單都重新載入一次，因為「載得起來嗎」本身就是要顯示的資訊：
+    // 換過機器之後路徑可能還在設定裡但檔案已經不見了，而那會悄悄改變
+    // 驗證結果。使用者必須看得到。
+    const auto refresh = [&] {
+        const app::SignatureController::TrustLoadResult loaded =
+            signatures_->reloadTrustStore(paths);
+        list->clear();
+        for (const QString& path : paths) {
+            auto* item = new QListWidgetItem(QFileInfo(path).fileName(), list);
+            item->setData(Qt::UserRole, path);
+            if (loaded.failed.contains(path)) {
+                item->setText(tr("%1（載入失敗）").arg(QFileInfo(path).fileName()));
+            }
+            item->setToolTip(path);
+        }
+        const auto certificates = signatures_->trustStore().certificates();
+        QStringList summary;
+        for (const auto& certificate : certificates) {
+            summary << tr("主體：%1\n簽發者：%2\n有效至：%3")
+                           .arg(QString::fromStdString(certificate.subject),
+                                QString::fromStdString(certificate.issuer),
+                                QString::fromStdString(certificate.notAfter).trimmed());
+        }
+        detail->setText(summary.isEmpty() ? tr("目前沒有載入任何憑證。")
+                                          : summary.join(QStringLiteral("\n\n")));
+    };
+    refresh();
+
+    auto* buttons = new QDialogButtonBox(&dialog);
+    auto* addButton = buttons->addButton(tr("加入..."), QDialogButtonBox::ActionRole);
+    auto* removeButton = buttons->addButton(tr("移除"), QDialogButtonBox::ActionRole);
+    buttons->addButton(QDialogButtonBox::Close);
+    layout->addWidget(buttons);
+
+    connect(addButton, &QPushButton::clicked, &dialog, [&] {
+        const QStringList chosen = QFileDialog::getOpenFileNames(
+            &dialog, tr("加入信任的憑證"), QString(),
+            tr("憑證 (*.pem *.crt *.cer *.der);;所有檔案 (*)"));
+        for (const QString& path : chosen) {
+            if (!paths.contains(path)) paths << path;
+        }
+        settings_->setTrustedCertificateFiles(paths);
+        refresh();
+    });
+    connect(removeButton, &QPushButton::clicked, &dialog, [&] {
+        QListWidgetItem* item = list->currentItem();
+        if (item == nullptr) return;
+        paths.removeAll(item->data(Qt::UserRole).toString());
+        settings_->setTrustedCertificateFiles(paths);
+        refresh();
+    });
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::accept);
+    connect(buttons->button(QDialogButtonBox::Close), &QPushButton::clicked, &dialog,
+            &QDialog::accept);
+
+    dialog.exec();
+
+    // 關閉時重新驗一次：信任清單變了，畫面上的簽章狀態就過期了，
+    // 而使用者看著一個舊結果會以為自己的變更沒有生效。
+    if (!currentPath_.isEmpty() && controller_->isOpen()) signatures_->verify();
+}
+
+void MainWindow::auditSpaceUsage() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, tr("空間使用稽核"), tr("尚未開啟文件"));
+        return;
+    }
+
+    QFile file(currentPath_);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("空間使用稽核"),
+                             tr("無法讀取檔案：%1").arg(file.errorString()));
+        return;
+    }
+    const QByteArray bytes = file.readAll();
+    file.close();
+
+    const auto audit = engine::objects::auditSpaceUsage(
+        std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())));
+    if (!audit.ok) {
+        QMessageBox::warning(this, tr("空間使用稽核"),
+                             QString::fromStdString(audit.diagnostic));
+        return;
+    }
+
+    const auto asMegabytes = [](std::uint64_t value) {
+        return QString::number(static_cast<double>(value) / (1024.0 * 1024.0), 'f', 2);
+    };
+
+    QStringList lines;
+    lines << tr("檔案大小：%1 MB").arg(asMegabytes(audit.fileBytes));
+    lines << QString();
+    for (const auto& usage : audit.categories) {
+        const double share = audit.fileBytes > 0
+                                 ? 100.0 * static_cast<double>(usage.bytes) /
+                                       static_cast<double>(audit.fileBytes)
+                                 : 0.0;
+        lines << tr("%1：%2 MB（%3%，%4 個物件）")
+                     .arg(QString::fromUtf8(engine::objects::describe(usage.category)))
+                     .arg(asMegabytes(usage.bytes))
+                     .arg(QString::number(share, 'f', 1))
+                     .arg(usage.objectCount);
+    }
+    lines << QString();
+    // 差額要說出來而不是藏起來：它就是「另存新檔會變小多少」的來源。
+    lines << tr("xref、空白與不可達物件：%1 MB").arg(asMegabytes(audit.overheadBytes()));
+    lines << tr("（不可達物件可用「另存新檔」的最佳化路徑丟掉）");
+
+    QMessageBox box(this);
+    box.setWindowTitle(tr("空間使用稽核"));
+    box.setText(tr("%1 的空間分布").arg(QFileInfo(currentPath_).fileName()));
+    box.setInformativeText(lines.join(QStringLiteral("\n")));
+    box.setIcon(QMessageBox::Information);
+    box.exec();
 }
 
 void MainWindow::clearAllSignatures() {

@@ -5,6 +5,8 @@
 # 路徑——用我們自己的剖析器驗自己寫的位元組，等於用同一份程式碼證明自己是對的。
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::objects)
 alioth_add_test(test_pdf_object test_pdf_object.cpp)
+# 空間使用稽核（PDF-XChange 的 Audit Space Usage）。純物件層，不連 PDFium。
+alioth_add_test(test_space_audit test_space_audit.cpp)
 
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::objects Alioth::annotations)
 alioth_add_test(test_incremental_appender test_incremental_appender.cpp object_fixture.h)

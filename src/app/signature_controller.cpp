@@ -45,6 +45,40 @@ void SignatureController::closeDocument() {
 
 std::int32_t SignatureController::signatureCount() const { return scanner_->signatureCount(); }
 
+SignatureController::TrustLoadResult SignatureController::reloadTrustStore(
+    const QStringList& certificateFiles) {
+    TrustLoadResult result;
+
+    auto store = std::make_unique<engine::signature::TrustStore>();
+    for (const QString& path : certificateFiles) {
+        QFile file(path);
+        if (!file.open(QIODevice::ReadOnly)) {
+            result.failed << path;
+            continue;
+        }
+        const QByteArray bytes = file.readAll();
+        file.close();
+
+        // PEM 先試：文字檔比較常見，而且一個 PEM 檔可能含多張憑證。
+        // DER 是二進位，餵給 PEM 剖析器只會安靜地讀不到東西，不會誤判。
+        const bool pemOk = store->addCertificatePem(
+            std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())));
+        const bool derOk =
+            pemOk ? false
+                  : store->addCertificateDer(
+                        reinterpret_cast<const std::uint8_t*>(bytes.constData()),
+                        static_cast<std::size_t>(bytes.size()));
+        if (pemOk || derOk) {
+            ++result.loaded;
+        } else {
+            result.failed << path;
+        }
+    }
+
+    trust_ = std::move(store);
+    return result;
+}
+
 SignatureController::ClearOutcome SignatureController::clearSignatures(const QString& path) {
     ClearOutcome outcome;
 
@@ -199,7 +233,7 @@ void SignatureController::verify() {
     // 是兩件事，把前者顯示成後者正是簽章驗證最不該犯的錯。
     options.revocationPolicy = engine::signature::RevocationPolicy::SoftFail;
 
-    scanner_->scan(&trust_, options, nullptr,
+    scanner_->scan(trust_.get(), options, nullptr,
                    [this](std::vector<engine::signature::SignatureReport> reports) {
                        QMetaObject::invokeMethod(
                            this,

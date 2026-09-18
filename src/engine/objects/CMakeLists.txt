@@ -28,6 +28,8 @@ add_library(alioth_objects STATIC
     annotation_reader.h
     measurement_writer.cpp
     measurement_writer.h
+    space_audit.cpp
+    space_audit.h
     struct_tree_reader.cpp
     struct_tree_reader.h
     reading_order.cpp

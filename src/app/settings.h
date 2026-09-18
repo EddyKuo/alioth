@@ -76,6 +76,18 @@ public:
     [[nodiscard]] std::vector<ExternalTool> externalTools() const;
     void setExternalTools(const std::vector<ExternalTool>& tools);
 
+    // 使用者自行加入的信任根憑證檔（PDF-XChange 的 Digital IDs）。
+    //
+    // 只存路徑不存憑證內容：信任根是公開資料不是秘密，但**它是一個信任決定**，
+    // 而把決定的依據複製一份藏在設定檔裡，會讓「這台機器信任哪些憑證」變成
+    // 兩個真相。路徑失效時由 UI 明確標示，不靜默移除——使用者換過機器之後
+    // 需要知道自己原本信任的是哪幾張。
+    //
+    // 清單為空是合理的預設：PRD §4.1 的立場是信任判斷三平台一致，
+    // 因此刻意不自動載入作業系統的憑證存放區。
+    [[nodiscard]] QStringList trustedCertificateFiles() const;
+    void setTrustedCertificateFiles(const QStringList& paths);
+
     // 最近檔案，最新的在最前面。重複開啟同一個檔案只會把它移到最前，不會出現兩次。
     [[nodiscard]] QStringList recentFiles() const;
     void addRecentFile(const QString& path);

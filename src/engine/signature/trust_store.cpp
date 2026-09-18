@@ -61,6 +61,58 @@ bool TrustStore::addDefaultPaths() {
     return ok;
 }
 
+namespace {
+
+// X509_NAME 轉可讀字串。oneline 的輸出是 "/C=TW/O=.../CN=..."，
+// 對「這是不是我以為的那一張」這個問題已經夠用，而且不必自己走 RDN。
+std::string nameToString(X509_NAME* name) {
+    if (name == nullptr) return {};
+    char buffer[512] = {};
+    if (X509_NAME_oneline(name, buffer, static_cast<int>(sizeof(buffer))) == nullptr) return {};
+    return std::string(buffer);
+}
+
+std::string timeToString(const ASN1_TIME* time) {
+    if (time == nullptr) return {};
+    BIO* bio = BIO_new(BIO_s_mem());
+    if (bio == nullptr) return {};
+    std::string out;
+    if (ASN1_TIME_print(bio, time) == 1) {
+        char* data = nullptr;
+        const long length = BIO_get_mem_data(bio, &data);
+        if (data != nullptr && length > 0) out.assign(data, static_cast<std::size_t>(length));
+    }
+    BIO_free(bio);
+    ERR_clear_error();
+    return out;
+}
+
+}  // namespace
+
+std::vector<TrustedCertificate> TrustStore::certificates() const {
+    std::vector<TrustedCertificate> out;
+    if (impl_->store == nullptr) return out;
+
+    STACK_OF(X509_OBJECT)* objects = X509_STORE_get0_objects(impl_->store);
+    if (objects == nullptr) return out;
+
+    const int count = sk_X509_OBJECT_num(objects);
+    out.reserve(static_cast<std::size_t>(count > 0 ? count : 0));
+    for (int i = 0; i < count; ++i) {
+        X509_OBJECT* entry = sk_X509_OBJECT_value(objects, i);
+        if (entry == nullptr) continue;
+        X509* cert = X509_OBJECT_get0_X509(entry);
+        if (cert == nullptr) continue;  // CRL 之類的項目也在同一個堆疊裡
+
+        TrustedCertificate summary;
+        summary.subject = nameToString(X509_get_subject_name(cert));
+        summary.issuer = nameToString(X509_get_issuer_name(cert));
+        summary.notAfter = timeToString(X509_get0_notAfter(cert));
+        out.push_back(std::move(summary));
+    }
+    return out;
+}
+
 std::size_t TrustStore::size() const noexcept { return impl_->count; }
 
 void* TrustStore::nativeHandle() const noexcept { return impl_->store; }

@@ -363,6 +363,13 @@ int PdfSourceDocument::generationOf(int number) const {
     return it == xref_.end() ? 0 : it->second.generation;
 }
 
+std::vector<int> PdfSourceDocument::objectNumbers() const {
+    std::vector<int> numbers;
+    numbers.reserve(xref_.size());
+    for (const auto& entry : xref_) numbers.push_back(entry.first);
+    return numbers;
+}
+
 PdfObject PdfSourceDocument::object(int number) const {
     if (const auto cached = cache_.find(number); cached != cache_.end()) return cached->second;
     const auto it = xref_.find(number);

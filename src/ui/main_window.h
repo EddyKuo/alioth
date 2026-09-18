@@ -210,6 +210,8 @@ private:
     [[nodiscard]] bool writeAndOpenNewDocument(const QString& title, const std::string& bytes,
                                                const QString& suggestedName);
     // 寄出所有開啟的文件（PDF-XChange 的 Email All Open Documents）。
+    void manageTrustedCertificates();  // PDF-XChange 的 Digital IDs
+    void auditSpaceUsage();  // PDF-XChange 的 Audit Space Usage
     void clearAllSignatures();  // PDF-XChange 的 Clear all Signatures
     void emailAllOpenDocuments();
     // 設定的匯出／匯入／重設（PDF-XChange 的 Manage Settings）。

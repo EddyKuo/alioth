@@ -74,6 +74,10 @@ public:
     // 惡意檔案可以用互相指涉的 /Kids 讓遞迴實作直接爆掉。
     [[nodiscard]] const std::vector<PdfRef>& pages() const noexcept { return pages_; }
 
+    // 檔案裡有哪些物件編號，由小到大。空間稽核要走遍所有物件，
+    // 而「有哪些」只有 xref 知道——從 1 數到 /Size 會撞上一堆不存在的編號。
+    [[nodiscard]] std::vector<int> objectNumbers() const;
+
     // 沿 /Parent 鏈找可繼承的屬性（/Resources、/MediaBox…）。
     [[nodiscard]] PdfObject inheritedPageAttribute(const PdfRef& page, const std::string& key) const;
 

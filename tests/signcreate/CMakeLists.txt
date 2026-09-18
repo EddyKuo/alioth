@@ -58,6 +58,22 @@ add_custom_command(TARGET test_signature_creator POST_BUILD
             "${PDFium_DIR}/bin/pdfium.dll" "$<TARGET_FILE_DIR:test_signature_creator>"
 )
 
+# 清除所有簽章欄位（PDF-XChange 的 Clear all Signatures）。純物件層，
+# 不需要 PDFium 也不需要 OpenSSL——語料用未簽署的簽章欄位範本即可。
+set(ALIOTH_TEST_LIBS Alioth::domain Alioth::signature Alioth::objects)
+alioth_add_test(test_signature_clear test_signature_clear.cpp)
+target_include_directories(test_signature_clear PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/../signature
+    ${ALIOTH_SIGNCREATE_OPENSSL_INCLUDE}
+)
+target_link_libraries(test_signature_clear PRIVATE ${ALIOTH_SIGNCREATE_OPENSSL_LIBS})
+set_property(TEST test_signature_clear APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+add_custom_command(TARGET test_signature_clear POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${OPENSSL_ROOT_DIR}/bin/libcrypto-3-x64.dll" "$<TARGET_FILE_DIR:test_signature_clear>"
+)
+
 # 應用層的簽署入口（錯誤處理與不留半寫檔案）。密碼學本身由上面那支測試守。
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app Alioth::signature Alioth::objects)
 alioth_add_test(test_signing_service test_signing_service.cpp)

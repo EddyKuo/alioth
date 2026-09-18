@@ -202,6 +202,20 @@ private:
     // 而使用者不見得記得自己在清單裡點過什麼。
     enum class ExportScope { All, SelectedOnly };
     void exportAnnotationsToFile(ExportScope scope);
+    // 建立新文件（PDF-XChange 的 File → New Document）。三條路徑的引擎側
+    // 早就完成並測過，缺的一直是入口。
+    void createBlankDocument();
+    void createDocumentFromTextFile();
+    void createDocumentFromImages();
+    [[nodiscard]] bool writeAndOpenNewDocument(const QString& title, const std::string& bytes,
+                                               const QString& suggestedName);
+    // 寄出所有開啟的文件（PDF-XChange 的 Email All Open Documents）。
+    void clearAllSignatures();  // PDF-XChange 的 Clear all Signatures
+    void emailAllOpenDocuments();
+    // 設定的匯出／匯入／重設（PDF-XChange 的 Manage Settings）。
+    void exportSettingsProfile();
+    void importSettingsProfile();
+    void resetSettingsProfile();
     // PRD-UI-017：把磁碟上的檔案改名，並重新開啟新路徑。
     void renameCurrentDocument();
     // PRD-ZOOM-003 Fit Visible：忽略白邊，縮放到實際內容範圍。

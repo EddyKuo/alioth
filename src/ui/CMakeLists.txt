@@ -70,7 +70,9 @@ target_link_libraries(alioth_ui PUBLIC Alioth::app Alioth::ribbon Alioth::print 
     # Fit Visible 用頁面編輯器的內容邊界偵測（PRD-ZOOM-003），與裁切至白邊同一個判準。
     Alioth::pages
     # 文件比較（PRD-CMP-001）只在 main_window.cpp 用到。
-    Alioth::compare)
+    Alioth::compare
+    # 建立新文件（空白／文字／Markdown／影像）的三條路徑，只在 main_window.cpp 用到。
+    Alioth::create)
 add_library(Alioth::ui ALIAS alioth_ui)
 
 add_subdirectory(ribbon)

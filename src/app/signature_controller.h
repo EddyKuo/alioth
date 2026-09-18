@@ -73,6 +73,22 @@ public:
 
     [[nodiscard]] SigningOutcome signDocument(const QString& path, const SigningRequest& request);
 
+    struct ClearOutcome {
+        bool ok{false};
+        QString message;
+        int removedFields{0};
+        // 復原用：純附加，截回原長度即可。
+        quint64 previousSize{0};
+        QByteArray boundaryGuard;
+    };
+
+    // 清除所有簽章欄位（PDF-XChange 的 Clear all Signatures）。
+    //
+    // **不是「讓文件回到未簽署的狀態」**：寫入走增量附加，被移除的只是參照，
+    // /Sig 字典與被簽的位元組全部還留在檔案裡。呼叫端必須把這件事告訴使用者，
+    // 否則他會以為簽章資料已經不見了——而那是一個關於隱私的錯誤認知。
+    [[nodiscard]] ClearOutcome clearSignatures(const QString& path);
+
 signals:
     void reportsReady();
     void verifyFailed(const QString& message);

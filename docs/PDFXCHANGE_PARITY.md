@@ -47,7 +47,7 @@ Convert 的 OCR 與 Office 轉換），那是 PRD §2.1 的刻意排除，不是
 
 ---
 
-## 缺口（本輪補上）
+## 缺口（已補上）
 
 | PDF-XChange | 我們原本 | 處置 |
 |---|---|---|
@@ -59,12 +59,25 @@ Convert 的 OCR 與 Office 轉換），那是 PRD §2.1 的刻意排除，不是
 | Organize / Pages → Duplicate Page | 引擎有 `duplicatePages`，沒有接線 | 接上服務層與選單 |
 | Organize / Page Marks → Remove All | 只能加，不能一次移除 | 補「移除所有頁面標記」 |
 | Protect → Clear All Signatures | 沒有 | 補清除所有簽章 |
-| Protect → Digital IDs | 信任存放區只能由程式載入 | 補憑證管理對話框 |
-| File → Audit Space Usage | 沒有 | 補空間使用稽核 |
 | File → Manage Settings | `settings_profile` 有實作，沒有接線 | 接上匯出／匯入／重設 |
-| File → New Blank Document | 只能從文字、影像、網頁建立 | 補空白文件 |
 | File / Share → Email All Open Documents | 只能寄目前這一份 | 補寄出全部 |
 | Bookmarks → Expand / Collapse All | 沒有 | 補全展開／全收合 |
+| File → New Document（空白／文字／影像） | 引擎側三條路徑都完成並測過，但**沒有任何入口** | 補「檔案 → 建立」子選單與 Ribbon 群組 |
+
+全部十二項都已接上選單與 Ribbon 預設配置。Ribbon 的按鈕數從 148 增為 169，
+未接上的佔位數維持 14（新增的全部都接了真動作）。
+
+---
+
+## 仍然缺的（在範圍內，但另有相依）
+
+| PDF-XChange | 我們的狀況 |
+|---|---|
+| File → Open from URL、Convert → From Web Page | 引擎側完成並測過（PRD-IO-010 / 014），但**產品裡沒有 HTTP 用戶端**——`WebPageFetcher` 目前只有測試注入的假實作。要接上得先在平台層做一個 HTTP 傳輸，那是獨立的工作包，且會牽動 PRD §8.2 的連線確認流程 |
+| Protect → Digital IDs | 信任存放區（`TrustStore`）可以載入憑證，但沒有「管理」介面，也沒有把使用者選的憑證存進設定。要做得先決定憑證存哪裡與怎麼保護 |
+| File → Audit Space Usage | 物件層有完整的解析能力，缺的是分類與統計那一層 |
+
+這三項都不是「忘了做」，是各自缺一個前置決策或前置元件。動手前先把那件事定了。
 
 ---
 

@@ -59,6 +59,7 @@
 #include <memory>
 #include "app/document_controller.h"
 #include "app/document_email.h"
+#include "app/settings_profile.h"
 #include "app/selection_controller.h"
 #include "platform/email_compose.h"
 #include "platform/external_process.h"
@@ -78,6 +79,9 @@
 #include "platform/atomic_file.h"
 #include <cstring>
 #include "app/uisystem/tab_title_model.h"
+#include "engine/create/image_to_pdf.h"
+#include "engine/create/markdown_to_pdf.h"
+#include "engine/create/text_to_pdf.h"
 #include "engine/pages/page_editor.h"
 #include "domain/annotation_filter.h"
 #include <QComboBox>
@@ -615,6 +619,23 @@ void MainWindow::buildActions() {
             [this] { rebuildRecentMenu(); });
     rebuildRecentMenu();
 
+    // 建立新文件（PDF-XChange 的 File → New Document）。
+    //
+    // 引擎側的四條建立路徑（空白、純文字、Markdown、影像）早就完成並測過，
+    // 但一直沒有入口——沒有入口的功能對使用者而言不存在。
+    auto* createMenu = fileMenu->addMenu(tr("建立(&N)"));
+    auto* blankAction = createMenu->addAction(tr("空白文件..."));
+    registerRibbonAction(QStringLiteral("file.newBlank"), blankAction);
+    connect(blankAction, &QAction::triggered, this, [this] { createBlankDocument(); });
+
+    auto* fromTextAction = createMenu->addAction(tr("從文字或 Markdown 檔..."));
+    registerRibbonAction(QStringLiteral("file.newFromText"), fromTextAction);
+    connect(fromTextAction, &QAction::triggered, this, [this] { createDocumentFromTextFile(); });
+
+    auto* fromImagesAction = createMenu->addAction(tr("從影像檔..."));
+    registerRibbonAction(QStringLiteral("file.newFromImages"), fromImagesAction);
+    connect(fromImagesAction, &QAction::triggered, this, [this] { createDocumentFromImages(); });
+
     auto* printAction = fileMenu->addAction(tr("列印(&P)..."));
     printAction->setShortcut(QKeySequence::Print);
     connect(printAction, &QAction::triggered, this, [this] { printDocument(); });
@@ -648,6 +669,24 @@ void MainWindow::buildActions() {
     auto* emailAction = fileMenu->addAction(tr("以電子郵件傳送(&M)..."));
     registerRibbonAction(QStringLiteral("file.email"), emailAction);
     connect(emailAction, &QAction::triggered, this, [this] { emailCurrentDocument(); });
+
+    // 寄出所有開啟的文件（PDF-XChange 的 Email All Open Documents）。
+    // 審閱完一批文件之後一次寄回去，是這個功能唯一的用途。
+    auto* emailAllAction = fileMenu->addAction(tr("寄出所有開啟的文件..."));
+    registerRibbonAction(QStringLiteral("file.emailAll"), emailAllAction);
+    connect(emailAllAction, &QAction::triggered, this, [this] { emailAllOpenDocuments(); });
+
+    // 設定的匯出／匯入／重設（PDF-XChange 的 File → Manage Settings）。
+    // settings_profile 早就實作並測過，同樣缺的是入口。
+    auto* manageSettingsMenu = fileMenu->addMenu(tr("管理設定(&G)"));
+    registerRibbonAction(QStringLiteral("app.manageSettings"),
+                         manageSettingsMenu->menuAction());
+    auto* exportSettingsAction = manageSettingsMenu->addAction(tr("匯出設定..."));
+    connect(exportSettingsAction, &QAction::triggered, this, [this] { exportSettingsProfile(); });
+    auto* importSettingsAction = manageSettingsMenu->addAction(tr("匯入設定..."));
+    connect(importSettingsAction, &QAction::triggered, this, [this] { importSettingsProfile(); });
+    auto* resetSettingsAction = manageSettingsMenu->addAction(tr("重設為預設值..."));
+    connect(resetSettingsAction, &QAction::triggered, this, [this] { resetSettingsProfile(); });
 
     // PRD-UI-016：第三方程式工具列。管理入口放在檔案選單，不論工具列目前
     // 是否顯示（清單為空時工具列本身不出現），使用者都找得到設定畫面。
@@ -1019,6 +1058,12 @@ void MainWindow::buildActions() {
     connect(clearRedactAction, &QAction::triggered, this, [this] { clearRedactionMarks(); });
 
     protectMenu->addSeparator();
+    // 清除所有簽章欄位（PDF-XChange 的 Clear all Signatures）。
+    // 用途是拿一份簽過的文件當範本重走流程。
+    auto* clearSignaturesAction = protectMenu->addAction(tr("清除所有簽章欄位..."));
+    registerRibbonAction(QStringLiteral("sign.clearAll"), clearSignaturesAction);
+    connect(clearSignaturesAction, &QAction::triggered, this, [this] { clearAllSignatures(); });
+
     auto* signAction = protectMenu->addAction(tr("數位簽署(&S)..."));
     registerRibbonAction(QStringLiteral("sign.digitalSign"), signAction);
     connect(signAction, &QAction::triggered, this, [this] { signCurrentDocument(); });
@@ -1570,6 +1615,19 @@ void MainWindow::buildDockPanels() {
     outlineTree_->setAccessibleName(tr("書籤"));
     outlineTree_->setAccessibleDescription(tr("方向鍵展開與收合，Enter 跳到書籤所指位置"));
     outlineTree_->setHeaderHidden(true);
+    // 全部展開／全部收合（PDF-XChange 的 Bookmarks → Expand / Collapse All）。
+    // 掛在書籤樹的右鍵選單上而不是主選單：這兩個動作只在看著書籤樹時才有意義，
+    // 放進主選單等於讓每個人每次都掃過兩個大部分時候用不到的項目。
+    outlineTree_->setContextMenuPolicy(Qt::ActionsContextMenu);
+    auto* expandAllAction = new QAction(tr("全部展開"), outlineTree_);
+    connect(expandAllAction, &QAction::triggered, this, [this] { outlineTree_->expandAll(); });
+    outlineTree_->addAction(expandAllAction);
+    registerRibbonAction(QStringLiteral("bookmark.expandAll"), expandAllAction);
+
+    auto* collapseAllAction = new QAction(tr("全部收合"), outlineTree_);
+    connect(collapseAllAction, &QAction::triggered, this, [this] { outlineTree_->collapseAll(); });
+    outlineTree_->addAction(collapseAllAction);
+    registerRibbonAction(QStringLiteral("bookmark.collapseAll"), collapseAllAction);
     connect(outlineTree_, &QTreeWidget::itemActivated, this, [this](QTreeWidgetItem* item, int) {
         const QVariant page = item->data(0, Qt::UserRole);
         if (page.isValid()) navigateToPage(page.toInt());
@@ -4837,6 +4895,308 @@ void MainWindow::emailCurrentDocument() {
     if (!result.ok) {
         QMessageBox::warning(this, tr("以電子郵件傳送"), result.error);
     }
+}
+
+// 三條建立路徑共用的收尾：寫檔、開起來。寫失敗時不留半個檔案——
+// 使用者看到一個開不起來的新檔會以為是程式壞了。
+bool MainWindow::writeAndOpenNewDocument(const QString& title, const std::string& bytes,
+                                         const QString& suggestedName) {
+    const QString target = QFileDialog::getSaveFileName(this, title, suggestedName,
+                                                        tr("PDF 檔案 (*.pdf)"));
+    if (target.isEmpty()) return false;
+
+    QFile file(target);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, title, tr("無法寫入 %1").arg(target));
+        return false;
+    }
+    const qint64 written = file.write(bytes.data(), static_cast<qint64>(bytes.size()));
+    file.close();
+    if (written != static_cast<qint64>(bytes.size())) {
+        QFile::remove(target);
+        QMessageBox::warning(this, title, tr("寫入 %1 時中斷").arg(target));
+        return false;
+    }
+
+    openPath(target);
+    statusBar()->showMessage(tr("已建立 %1").arg(target), 5000);
+    return true;
+}
+
+void MainWindow::createBlankDocument() {
+    bool accepted = false;
+    const int pages = QInputDialog::getInt(this, tr("空白文件"), tr("頁數："), 1, 1, 10000, 1,
+                                           &accepted);
+    if (!accepted) return;
+
+    engine::pages::PageEditor editor;
+    editor.createEmpty();
+    // A4 直向。不問紙張大小：空白文件的用途是「先有一份東西好放註解或插頁」，
+    // 多一個問題只會擋在路上，而尺寸之後可以用「調整頁面尺寸」改。
+    if (!editor.insertBlankPages(0, pages, 595.276, 841.89).ok()) {
+        QMessageBox::warning(this, tr("空白文件"), tr("建立頁面失敗"));
+        return;
+    }
+
+    const QString target =
+        QFileDialog::getSaveFileName(this, tr("空白文件"), QStringLiteral("blank.pdf"),
+                                     tr("PDF 檔案 (*.pdf)"));
+    if (target.isEmpty()) return;
+    if (!editor.saveAsCopy(target.toStdString(), engine::save::SaveOptions{}).ok()) {
+        QMessageBox::warning(this, tr("空白文件"), tr("無法寫入 %1").arg(target));
+        return;
+    }
+    openPath(target);
+    statusBar()->showMessage(tr("已建立 %1（%2 頁）").arg(target).arg(pages), 5000);
+}
+
+void MainWindow::createDocumentFromTextFile() {
+    const QString source = QFileDialog::getOpenFileName(
+        this, tr("從文字或 Markdown 檔建立"), QString(),
+        tr("文字與 Markdown (*.txt *.md *.markdown);;所有檔案 (*)"));
+    if (source.isEmpty()) return;
+
+    QFile file(source);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("從文字建立"),
+                             tr("無法讀取檔案：%1").arg(file.errorString()));
+        return;
+    }
+    const QByteArray raw = file.readAll();
+    file.close();
+    const std::string text(raw.constData(), static_cast<std::size_t>(raw.size()));
+
+    // 副檔名決定走哪一條排版路徑。Markdown 會產生標題階層與書籤意圖，
+    // 純文字不會——把 .md 當純文字排出來的結果是滿篇的 # 與 *。
+    const QString suffix = QFileInfo(source).suffix().toLower();
+    const bool markdown = suffix == QLatin1String("md") || suffix == QLatin1String("markdown");
+
+    std::string bytes;
+    std::string diagnostic;
+    if (markdown) {
+        const auto result = engine::create::createPdfFromMarkdown(text);
+        if (!result.ok) diagnostic = result.diagnostic;
+        bytes = result.bytes;
+    } else {
+        const auto result = engine::create::createPdfFromPlainText(text);
+        if (!result.ok) diagnostic = result.diagnostic;
+        bytes = result.bytes;
+    }
+    if (!diagnostic.empty()) {
+        QMessageBox::warning(this, tr("從文字建立"),
+                             tr("排版失敗：%1").arg(QString::fromStdString(diagnostic)));
+        return;
+    }
+
+    (void)writeAndOpenNewDocument(tr("從文字建立"), bytes,
+                                  QFileInfo(source).completeBaseName() + QStringLiteral(".pdf"));
+}
+
+void MainWindow::createDocumentFromImages() {
+    const QStringList sources = QFileDialog::getOpenFileNames(
+        this, tr("從影像建立"), QString(),
+        tr("影像 (*.png *.jpg *.jpeg *.bmp *.tif *.tiff);;所有檔案 (*)"));
+    if (sources.isEmpty()) return;
+
+    std::vector<domain::create::SourceImage> images;
+    images.reserve(static_cast<std::size_t>(sources.size()));
+    for (const QString& path : sources) {
+        QImage image(path);
+        if (image.isNull()) {
+            QMessageBox::warning(this, tr("從影像建立"), tr("無法讀取影像：%1").arg(path));
+            return;
+        }
+        // 一律轉成 RGBA8 再取位元組：來源可能是索引色、單色或任何 Qt 支援的
+        // 格式，而引擎只認未壓縮的 RGB/RGBA。含 alpha 的會走 /SMask。
+        const bool hasAlpha = image.hasAlphaChannel();
+        image = image.convertToFormat(hasAlpha ? QImage::Format_RGBA8888
+                                               : QImage::Format_RGB888);
+
+        domain::create::SourceImage source;
+        source.width = image.width();
+        source.height = image.height();
+        source.format = hasAlpha ? domain::create::ImagePixelFormat::Rgba8
+                                 : domain::create::ImagePixelFormat::Rgb8;
+        // dotsPerMeterX 為 0 代表來源沒寫 dpi，這時用 96 而不是猜——
+        // 猜錯的症狀是整份文件的紙張尺寸都不對。
+        const int dpmX = image.dotsPerMeterX();
+        const int dpmY = image.dotsPerMeterY();
+        source.dpiX = dpmX > 0 ? dpmX * 0.0254 : 96.0;
+        source.dpiY = dpmY > 0 ? dpmY * 0.0254 : 96.0;
+
+        const int bytesPerLine = image.width() * (hasAlpha ? 4 : 3);
+        source.bytes.reserve(static_cast<std::size_t>(bytesPerLine) *
+                             static_cast<std::size_t>(image.height()));
+        for (int y = 0; y < image.height(); ++y) {
+            // 逐列複製而不是整塊 memcpy：QImage 的每一列有 4 位元組對齊的
+            // 補白，整塊複製會把補白也當成像素，畫面變成斜切。
+            const uchar* line = image.constScanLine(y);
+            source.bytes.insert(source.bytes.end(), line, line + bytesPerLine);
+        }
+        images.push_back(std::move(source));
+    }
+
+    const auto result = engine::create::createPdfFromImages(images);
+    if (!result.ok) {
+        QMessageBox::warning(this, tr("從影像建立"),
+                             tr("建立失敗：%1").arg(QString::fromStdString(result.diagnostic)));
+        return;
+    }
+
+    (void)writeAndOpenNewDocument(
+        tr("從影像建立"), result.bytes,
+        QFileInfo(sources.first()).completeBaseName() + QStringLiteral(".pdf"));
+}
+
+void MainWindow::clearAllSignatures() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, tr("清除所有簽章欄位"), tr("尚未開啟文件"));
+        return;
+    }
+
+    // 這一段話必須說出來。使用者按下「清除所有簽章」時的預期幾乎一定是
+    // 「簽章資料不見了」，而增量寫入做不到那件事——被移除的只是參照。
+    // 不講清楚等於讓他帶著一個錯誤的認知把檔案寄出去。
+    const auto answer = QMessageBox::warning(
+        this, tr("清除所有簽章欄位"),
+        tr("將移除文件裡所有簽章欄位。\n\n"
+           "請注意：寫入走增量附加，被移除的只是「參照」——簽章資料、憑證與"
+           "被簽的位元組仍然留在檔案裡，能讀 PDF 修訂版的工具找得回來。"
+           "若要真的不留痕跡，清除後請再走一次「另存新檔」的最佳化路徑。\n\n"
+           "要繼續嗎？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes) return;
+
+    if (!confirmNoExternalChange(tr("清除所有簽章欄位"))) return;
+
+    const app::SignatureController::ClearOutcome outcome =
+        signatures_->clearSignatures(currentPath_);
+    if (!outcome.ok) {
+        QMessageBox::information(this, tr("清除所有簽章欄位"), outcome.message);
+        return;
+    }
+
+    reloadCurrentDocument();
+    statusBar()->showMessage(outcome.message, 8000);
+}
+
+void MainWindow::emailAllOpenDocuments() {
+    const app::WindowState* window = tabs_.window(tabs_.primaryWindowId());
+    if (window == nullptr || window->tabs.empty()) {
+        QMessageBox::information(this, tr("寄出所有開啟的文件"), tr("沒有開啟中的文件"));
+        return;
+    }
+
+    // 逐份寄出而不是一封信附上全部：Simple MAPI 的附件介面一次一個檔案，
+    // 而且分開寄讓使用者可以逐封改收件人——審閱回覆的收件人本來就常常不同。
+    // 但要先問過：十份文件等於十個郵件視窗，那不該是按錯一個選單就發生的事。
+    const auto count = static_cast<int>(window->tabs.size());
+    if (QMessageBox::question(
+            this, tr("寄出所有開啟的文件"),
+            tr("將為 %1 份文件各開啟一封郵件。要繼續嗎？").arg(count)) != QMessageBox::Yes) {
+        return;
+    }
+
+    int sent = 0;
+    QStringList failures;
+    for (const app::TabState& tab : window->tabs) {
+        if (tab.documentId.isEmpty()) continue;
+        app::DocumentEmailRequest request;
+        request.documentPath = tab.documentId;
+        const platform::EmailComposeResult result =
+            app::sendDocumentByEmail(request, platform::defaultEmailSender());
+        if (result.ok) {
+            ++sent;
+        } else {
+            failures << tr("%1：%2").arg(QFileInfo(tab.documentId).fileName(), result.error);
+        }
+    }
+
+    if (!failures.isEmpty()) {
+        // 逐份列出失敗的，不要只說「部分失敗」——使用者需要知道哪幾份沒寄出去，
+        // 否則他得自己一份份確認。
+        QMessageBox::warning(this, tr("寄出所有開啟的文件"),
+                             tr("已寄出 %1 份，下列未寄出：\n%2")
+                                 .arg(sent)
+                                 .arg(failures.join(QStringLiteral("\n"))));
+        return;
+    }
+    statusBar()->showMessage(tr("已為 %1 份文件開啟郵件").arg(sent), 5000);
+}
+
+void MainWindow::exportSettingsProfile() {
+    const QString target = QFileDialog::getSaveFileName(
+        this, tr("匯出設定"), QStringLiteral("alioth-settings.json"),
+        tr("設定檔 (*.json)"));
+    if (target.isEmpty()) return;
+
+    const app::SettingsProfile profile =
+        app::captureProfile(*settings_, shortcuts_, theme_->mode());
+    const QByteArray bytes = app::exportProfile(profile);
+    QFile file(target);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        QMessageBox::warning(this, tr("匯出設定"), tr("無法寫入 %1").arg(target));
+        return;
+    }
+    file.write(bytes);
+    file.close();
+    statusBar()->showMessage(tr("已匯出設定到 %1").arg(target), 5000);
+}
+
+void MainWindow::importSettingsProfile() {
+    const QString source =
+        QFileDialog::getOpenFileName(this, tr("匯入設定"), QString(), tr("設定檔 (*.json)"));
+    if (source.isEmpty()) return;
+
+    QFile file(source);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("匯入設定"), tr("無法讀取檔案：%1").arg(file.errorString()));
+        return;
+    }
+    const QByteArray bytes = file.readAll();
+    file.close();
+
+    app::SettingsProfile profile;
+    QString error;
+    if (!app::parseProfile(bytes, profile, &error)) {
+        QMessageBox::warning(this, tr("匯入設定"), tr("設定檔格式不正確：%1").arg(error));
+        return;
+    }
+
+    app::ThemeMode themeMode = theme_->mode();
+    const app::ProfileImportResult result =
+        app::applyProfile(profile, *settings_, shortcuts_, &themeMode);
+    if (!result.ok) {
+        QMessageBox::warning(this, tr("匯入設定"), result.diagnostic);
+        return;
+    }
+    // 套用之後要立刻生效，否則使用者得重開程式才看得到——而他不會知道要重開。
+    theme_->setMode(themeMode);
+    applySettings();
+    applyShortcutScheme();
+    if (!result.skippedKeys.isEmpty()) {
+        QMessageBox::information(this, tr("匯入設定"),
+                                 tr("已套用 %1 項。下列項目被鎖定或不認得，已跳過：\n%2")
+                                     .arg(result.appliedKeys.size())
+                                     .arg(result.skippedKeys.join(QStringLiteral("\n"))));
+        return;
+    }
+    statusBar()->showMessage(tr("已套用 %1 項設定").arg(result.appliedKeys.size()), 5000);
+}
+
+void MainWindow::resetSettingsProfile() {
+    if (QMessageBox::question(this, tr("重設設定"),
+                              tr("將把所有偏好設定回復成預設值。已開啟的文件不受影響。"
+                                 "要繼續嗎？")) != QMessageBox::Yes) {
+        return;
+    }
+    app::ThemeMode themeMode = theme_->mode();
+    const QStringList reset = app::resetToFactoryDefaults(*settings_, shortcuts_, &themeMode);
+    theme_->setMode(themeMode);
+    applySettings();
+    applyShortcutScheme();
+    // 說出重設了幾項：按下去畫面沒明顯變化時，使用者無法分辨是成功了還是壞了。
+    statusBar()->showMessage(tr("已重設 %1 項設定為預設值").arg(reset.size()), 6000);
 }
 
 void MainWindow::rebuildExternalToolsToolbar() {

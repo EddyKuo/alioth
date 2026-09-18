@@ -44,6 +44,8 @@ add_library(alioth_signature STATIC
     signature_scanner.h
     signing_identity.cpp
     signing_identity.h
+    signature_clear.cpp
+    signature_clear.h
     signature_creator.cpp
     signature_creator.h
     timestamp_client.cpp

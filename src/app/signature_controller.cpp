@@ -1,5 +1,7 @@
 #include "app/signature_controller.h"
 
+#include "engine/signature/signature_clear.h"
+
 #include <QCryptographicHash>
 #include <QFile>
 #include <QMetaObject>
@@ -42,6 +44,61 @@ void SignatureController::closeDocument() {
 }
 
 std::int32_t SignatureController::signatureCount() const { return scanner_->signatureCount(); }
+
+SignatureController::ClearOutcome SignatureController::clearSignatures(const QString& path) {
+    ClearOutcome outcome;
+
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly)) {
+        outcome.message = tr("無法讀取檔案：%1").arg(source.errorString());
+        return outcome;
+    }
+    const QByteArray bytes = source.readAll();
+    source.close();
+
+    outcome.previousSize = static_cast<quint64>(bytes.size());
+    {
+        constexpr int kWindow = 4096;
+        const auto from = static_cast<int>(std::max<qsizetype>(0, bytes.size() - kWindow));
+        outcome.boundaryGuard =
+            QCryptographicHash::hash(bytes.mid(from), QCryptographicHash::Sha256);
+    }
+
+    const engine::signature::ClearSignaturesResult cleared =
+        engine::signature::clearSignatureFields(
+            std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())));
+    if (!cleared.ok) {
+        outcome.message = tr("清除失敗：%1").arg(QString::fromStdString(cleared.diagnostic));
+        return outcome;
+    }
+    if (!cleared.changedAnything()) {
+        // 沒有簽章欄位就不寫檔。空的附加段只會讓檔案長大而使用者什麼都沒得到。
+        outcome.message = tr("這份文件沒有簽章欄位");
+        return outcome;
+    }
+
+    // 純附加的前提要驗過才寫檔，與其他寫入路徑同一條規則。
+    if (cleared.bytes.size() < static_cast<std::size_t>(bytes.size()) ||
+        std::memcmp(cleared.bytes.data(), bytes.constData(),
+                    static_cast<std::size_t>(bytes.size())) != 0) {
+        outcome.message = tr("儲存結果不是增量，已中止");
+        return outcome;
+    }
+
+    platform::AtomicFileWriter writer(path);
+    if (!writer.begin() || !writer.write(cleared.bytes.data(), cleared.bytes.size()) ||
+        !writer.commit()) {
+        outcome.message = tr("寫檔失敗");
+        return outcome;
+    }
+
+    outcome.ok = true;
+    outcome.removedFields = cleared.removedFields;
+    outcome.message = tr("已清除 %1 個簽章欄位（%2 個 widget）")
+                          .arg(cleared.removedFields)
+                          .arg(cleared.removedWidgets);
+    return outcome;
+}
 
 SignatureController::SigningOutcome SignatureController::signDocument(
     const QString& path, const SigningRequest& request) {

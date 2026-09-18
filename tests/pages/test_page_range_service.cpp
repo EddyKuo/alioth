@@ -63,6 +63,8 @@ private slots:
     void mergingRefusesToWriteOverASource();
     void mergingProducesTheSumOfThePages();
     void splittingProducesOneFilePerChunk();
+    void duplicatingInsertsCopiesAfterTheSourcePages();
+    void duplicatingNothingIsRefused();
 
 private:
     std::unique_ptr<QTemporaryDir> dir_;
@@ -157,6 +159,34 @@ void TestPageRangeService::splittingProducesOneFilePerChunk() {
     QCOMPARE(result.pageCount, 3);
     QCOMPARE(pageCountOf(dir_->filePath(QStringLiteral("part-1.pdf"))), 1);
     QCOMPARE(pageCountOf(dir_->filePath(QStringLiteral("part-3.pdf"))), 1);
+    QCOMPARE(readAll(path), before);
+}
+
+// 複製頁面（PDF-XChange 的 Duplicate Page）。
+//
+// 引擎的 duplicatePages 已經有自己的測試；這裡驗的是應用層那一層——
+// 插入點的預設值（-1 代表「最後一個來源頁的正後方」）與全檔重寫的復原資料。
+void TestPageRangeService::duplicatingInsertsCopiesAfterTheSourcePages() {
+    const QString path = makeThreePagePdf(*dir_, QStringLiteral("dup.pdf"));
+    const QByteArray before = readAll(path);
+
+    PageOperationsService service;
+    const auto result = service.duplicatePages(path, {0, 1}, -1, RewriteConsent::confirmed());
+    QVERIFY2(result.ok, qPrintable(result.message));
+    QCOMPARE(result.pageCount, 5);
+    QCOMPARE(pageCountOf(path), 5);
+    // 全檔重寫，所以復原靠保留原始位元組——沒有它，複製頁面就復原不了。
+    QCOMPARE(result.previousBytes, before);
+}
+
+void TestPageRangeService::duplicatingNothingIsRefused() {
+    const QString path = makeThreePagePdf(*dir_, QStringLiteral("dup_none.pdf"));
+    const QByteArray before = readAll(path);
+
+    PageOperationsService service;
+    const auto result = service.duplicatePages(path, {}, -1, RewriteConsent::confirmed());
+    QVERIFY(!result.ok);
+    QVERIFY(!result.message.isEmpty());
     QCOMPARE(readAll(path), before);
 }
 

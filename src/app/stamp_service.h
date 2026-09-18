@@ -61,6 +61,17 @@ public:
     explicit StampService(QObject* parent = nullptr);
 
     [[nodiscard]] StampResult applyStamps(const StampRequest& request);
+
+    // 移除本程式加過的所有頁面標記（PDF-XChange 的 Watermarks / Header and
+    // Footer / Bates Numbering → Remove All）。
+    //
+    // 只移除我們自己加的——判定依據是寫入時放進串流字典的私有標記鍵。
+    // 別的工具加的浮水印移不掉，那是正確的行為：移除它需要剖析內容串流
+    // 並猜測哪一段是浮水印，而猜錯會刪掉使用者原本的內容。
+    //
+    // 與寫入一樣是純附加（只把 /Contents 裡的參照摘掉，不刪物件），
+    // 所以復原＝截回原長度，既有簽章維持「有效，簽署後有變更」。
+    [[nodiscard]] StampResult removeStamps(const QString& path);
 };
 
 }  // namespace alioth::app

@@ -166,6 +166,43 @@ enum class AnnotationSortKey : std::uint8_t { Page, Author, Type, Date };
     return indices;
 }
 
+// 文件順序裡的上一則／下一則註解（PDF-XChange 的 Previous / Next Comment）。
+//
+// 走文件順序而不是清單目前的排序：清單可以依作者或日期排，但「下一則」
+// 在使用者心裡是「往文件後面走」。依清單排序的話，連按幾次之後頁碼會跳來跳去，
+// 而使用者以為自己在逐頁往下審。
+//
+// current 超出範圍代表「還沒有選取任何一則」：往後從第一則開始，往前從最後一則。
+// 到頭或到尾時回傳 annotations.size()，**不繞回去**——繞回去的話使用者連按到底
+// 會不知不覺回到第一則，以為漏看了中間幾則又走一遍。
+[[nodiscard]] inline std::size_t adjacentInDocumentOrder(
+    const std::vector<AnnotationSummary>& annotations, std::size_t current, int direction) {
+    if (annotations.empty() || direction == 0) return annotations.size();
+
+    std::vector<std::size_t> order(annotations.size());
+    for (std::size_t i = 0; i < order.size(); ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&annotations](std::size_t a, std::size_t b) {
+        if (annotations[a].pageIndex != annotations[b].pageIndex) {
+            return annotations[a].pageIndex < annotations[b].pageIndex;
+        }
+        return annotations[a].indexOnPage < annotations[b].indexOnPage;
+    });
+
+    std::size_t position = order.size();
+    for (std::size_t i = 0; i < order.size(); ++i) {
+        if (order[i] == current) {
+            position = i;
+            break;
+        }
+    }
+
+    if (position >= order.size()) return direction > 0 ? order.front() : order.back();
+    if (direction > 0) {
+        return position + 1 < order.size() ? order[position + 1] : annotations.size();
+    }
+    return position > 0 ? order[position - 1] : annotations.size();
+}
+
 // 清單裡出現過的作者與型別，供 UI 填下拉選單。已排序且去重。
 [[nodiscard]] inline std::vector<std::string> distinctAuthors(
     const std::vector<AnnotationSummary>& annotations) {

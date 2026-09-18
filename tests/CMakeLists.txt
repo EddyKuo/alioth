@@ -147,6 +147,10 @@ set_property(TEST test_highlight_flow APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFO
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::engine Alioth::app Alioth::ui)
 alioth_add_test(test_ui_smoke test_ui_smoke.cpp pdf_fixture.h)
 set_property(TEST test_ui_smoke APPEND PROPERTY ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# 選取註解工具（對標 PDF-XChange 的 Select Comments Tool）。
+alioth_add_test(test_comment_selection_tool test_comment_selection_tool.cpp)
+set_property(TEST test_comment_selection_tool APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 alioth_add_test(test_annotation_properties test_annotation_properties.cpp)
 set_property(TEST test_annotation_properties APPEND PROPERTY
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

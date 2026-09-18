@@ -31,6 +31,16 @@ struct ContentAppendOptions {
     // 以 q/Q 包住新增的指令。/Contents 陣列在解析時等同單一串流，
     // 不平衡的圖形狀態會外溢到後續內容；預設包起來是唯一安全的作法。
     bool wrapInGraphicsState{true};
+
+    // 在新增的串流字典裡放一個私有標記鍵（值為 true），讓之後找得回來。
+    //
+    // 沒有它就沒有辦法實作「移除所有浮水印」：內容串流附加之後與原本的內容
+    // 在解析上是同一份，要分辨哪一段是我們加的，只能回頭剖析運算子並猜——
+    // 而猜錯的代價是刪掉使用者原本的內容。私有鍵是 PDF 規格允許的擴充方式
+    // （ISO 32000-2 §7.3.7：未知鍵必須被忽略），任何檢視器都不會受影響。
+    //
+    // 留空代表不加標記（例如單純的內容附加，不屬於任何一種戳記）。
+    std::string markerKey{};
 };
 
 struct ContentAppendResult {
@@ -46,5 +56,23 @@ struct ContentAppendResult {
 [[nodiscard]] ContentAppendResult appendPageContent(IncrementalAppender& appender, int pageIndex,
                                                     const std::string& content,
                                                     const ContentAppendOptions& options = {});
+
+// 移除所有帶指定標記鍵的內容串流參照（「移除所有浮水印／頁首頁尾／Bates」）。
+//
+// 只從 /Contents 陣列把參照摘掉，**不刪除被指向的物件**：附加式寫入本來就
+// 不能刪東西，而留著它讓復原仍然只是把檔案截回原長度。因此這一步與寫入
+// 一樣是純附加，既有簽章維持「有效，簽署後有變更」而不是「無效」。
+//
+// 只會動我們自己加的串流——標記鍵是我們寫的，別的工具不會有。
+// 別人加的浮水印移不掉，這是正確的行為：那需要剖析並猜測原始內容。
+struct RemoveMarkedResult {
+    bool ok{false};
+    std::string diagnostic;
+    int removedReferences{0};
+    int affectedPages{0};
+};
+
+[[nodiscard]] RemoveMarkedResult removeMarkedPageContent(IncrementalAppender& appender,
+                                                          const std::string& markerKey);
 
 }  // namespace alioth::engine::objects

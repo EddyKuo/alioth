@@ -226,6 +226,108 @@ private slots:
         QVERIFY2(check.clean(), qPrintable(check.output));
     }
 
+    // 移除所有頁面標記（PDF-XChange 的 Remove All）。
+    //
+    // 蓋一份審閱用的浮水印、審完再拿掉，是這個功能唯一的用途。
+    // 驗收是「文字層讀不到了」而不是「檔案變小了」——純附加的移除不會讓
+    // 檔案變小，它只是把 /Contents 裡的參照摘掉。
+    void removingStampsTakesThemOutOfTheTextLayer() {
+        app::StampRequest request;
+        request.path = path_;
+        request.textTemplate = QStringLiteral("DRAFT COPY");
+
+        app::StampService service;
+        QVERIFY(service.applyStamps(request).ok);
+        QVERIFY(pageText(path_, 0).find("DRAFT COPY") != std::string::npos);
+
+        const app::StampResult removed = service.removeStamps(path_);
+        QVERIFY2(removed.ok, qPrintable(removed.message));
+        QCOMPARE(removed.stampedPages, 3);
+
+        for (int page = 0; page < 3; ++page) {
+            QVERIFY2(pageText(path_, page).find("DRAFT COPY") == std::string::npos,
+                     "移除之後文字層仍然讀得到戳記");
+        }
+    }
+
+    // 移除本身也必須是純附加，否則「蓋章不讓簽章失效」這個賣點在
+    // 「蓋了又拿掉」的流程上就不成立了。
+    void removingIsAlsoPureAppend() {
+        app::StampRequest request;
+        request.path = path_;
+        request.textTemplate = QStringLiteral("DRAFT COPY");
+
+        app::StampService service;
+        QVERIFY(service.applyStamps(request).ok);
+
+        QFile stamped(path_);
+        QVERIFY(stamped.open(QIODevice::ReadOnly));
+        const QByteArray afterStamp = stamped.readAll();
+        stamped.close();
+
+        QVERIFY(service.removeStamps(path_).ok);
+
+        QFile cleaned(path_);
+        QVERIFY(cleaned.open(QIODevice::ReadOnly));
+        const QByteArray afterRemove = cleaned.readAll();
+        cleaned.close();
+
+        // 前綴逐位元組不變——連第一次蓋章寫進去的那一段也還在。
+        QVERIFY(afterRemove.size() > afterStamp.size());
+        QCOMPARE(afterRemove.left(afterStamp.size()), afterStamp);
+        // 原檔那一段當然也還在。
+        QCOMPARE(afterRemove.left(original_.size()), original_);
+    }
+
+    // 沒有我們加過的標記時不寫檔。空的附加段只會讓簽章狀態從「有效」變成
+    // 「簽署後有變更」，而使用者什麼都沒得到。
+    void removingNothingDoesNotTouchTheFile() {
+        app::StampService service;
+        const app::StampResult removed = service.removeStamps(path_);
+        QVERIFY(!removed.ok);
+        QVERIFY(!removed.message.isEmpty());
+
+        QFile file(path_);
+        QVERIFY(file.open(QIODevice::ReadOnly));
+        QCOMPARE(file.readAll(), original_);
+    }
+
+    // 移除之後再蓋一次要正常運作：使用者會換一個浮水印再蓋。
+    void stampingAgainAfterRemovalWorks() {
+        app::StampService service;
+
+        app::StampRequest first;
+        first.path = path_;
+        first.textTemplate = QStringLiteral("FIRST MARK");
+        QVERIFY(service.applyStamps(first).ok);
+        QVERIFY(service.removeStamps(path_).ok);
+
+        app::StampRequest second;
+        second.path = path_;
+        second.textTemplate = QStringLiteral("SECOND MARK");
+        QVERIFY(service.applyStamps(second).ok);
+
+        const std::string text = pageText(path_, 0);
+        QVERIFY2(text.find("SECOND MARK") != std::string::npos, "第二次蓋章沒有生效");
+        QVERIFY2(text.find("FIRST MARK") == std::string::npos, "被移除的戳記又回來了");
+    }
+
+    void removedDocumentIsStillStructurallyClean() {
+        app::StampRequest request;
+        request.path = path_;
+        request.textTemplate = QStringLiteral("DRAFT COPY");
+
+        app::StampService service;
+        QVERIFY(service.applyStamps(request).ok);
+        QVERIFY(service.removeStamps(path_).ok);
+
+        const alioth::test::QpdfCheckResult check = alioth::test::runQpdfCheck(path_);
+        if (check.status == alioth::test::QpdfStatus::NotAvailable) {
+            QSKIP("qpdf 不在可用位置，略過結構檢查");
+        }
+        QVERIFY2(check.clean(), qPrintable(check.output));
+    }
+
 private:
     std::unique_ptr<QTemporaryDir> dir_;
     QString path_;

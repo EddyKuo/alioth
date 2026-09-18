@@ -134,6 +134,14 @@ public:
 
     void setNightMode(bool enabled);
     void setRenderQuality(bool grayscale, bool smoothPaths, bool smoothText, bool smoothImages);
+
+    // 顯示／隱藏所有註解（FPDF_ANNOT）。純檢視選項，不改文件——關掉之後
+    // 看到的是原稿長什麼樣，那是審閱到一半最常需要的一個對照。
+    // 與夜間模式同樣不是圖磚鍵的一部分，所以切換時必須明確清快取。
+    void setAnnotationsVisible(bool visible);
+    [[nodiscard]] bool annotationsVisible() const noexcept {
+        return renderOptions_.drawAnnotations;
+    }
     [[nodiscard]] const engine::RenderOptions& renderOptions() const noexcept { return renderOptions_; }
     // 自訂背景與文字色（PRD-VIEW-007）。與夜間模式互斥，夜間模式優先。
     void setCustomColors(bool enabled, const QColor& background, const QColor& text);

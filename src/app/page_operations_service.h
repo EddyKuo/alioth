@@ -116,6 +116,15 @@ public:
     [[nodiscard]] PageOperationResult cropToContent(const QString& path,
                                                     const std::vector<int>& pages, RewriteConsent);
 
+    // 複製頁面（PDF-XChange 的 Organize / Pages → Duplicate Page）。
+    //
+    // 複本插在 destinationIndex（以**複製前**的索引表示插入點，與 movePages
+    // 一致）。-1 代表插在每一個來源頁的正後方——那是「複製這一頁」最常見的
+    // 意圖，而讓呼叫端自己算插入點會在多選時算錯。
+    [[nodiscard]] PageOperationResult duplicatePages(const QString& path,
+                                                     const std::vector<int>& pages,
+                                                     int destinationIndex, RewriteConsent);
+
     // 頁面尺寸調整（PRD-PAGE-003）。
     //
     // 縮放政策不給預設值，因為「改紙張大小」的兩種意思差別很大而且無法從

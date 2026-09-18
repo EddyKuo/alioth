@@ -526,6 +526,46 @@ void PageView::setFormFieldRects(std::vector<std::pair<int, domain::RectF>> rect
     if (highlightFields_) viewport()->update();
 }
 
+void PageView::setHighlightedRect(int pageIndex, const domain::RectF& pageRect) {
+    if (highlightPage_ == pageIndex && highlightRect_ == pageRect) return;
+    highlightPage_ = pageIndex;
+    highlightRect_ = pageRect;
+    viewport()->update();
+}
+
+void PageView::clearHighlightedRect() { setHighlightedRect(-1, domain::RectF{}); }
+
+void PageView::paintHighlightedRect(QPainter& painter, const domain::RectI& visible) const {
+    if (highlightPage_ < 0) return;
+
+    for (const domain::PagePlacement& placement : layout_.visiblePages(visible)) {
+        if (placement.pageIndex != highlightPage_) continue;
+        const domain::PageTransform transform{controller_->pageSizePt(placement.pageIndex),
+                                              renderScale(), rotation_};
+        const QPoint origin(placement.rect.x - visible.x, placement.rect.y - visible.y);
+        const domain::RectF box = highlightRect_.normalized();
+        const domain::PointF topLeft = transform.toDevice(domain::PointF{box.left, box.top});
+        const domain::PointF bottomRight =
+            transform.toDevice(domain::PointF{box.right, box.bottom});
+        QRectF rect(QPointF(origin.x() + topLeft.x, origin.y() + topLeft.y),
+                    QPointF(origin.x() + bottomRight.x, origin.y() + bottomRight.y));
+        rect = rect.normalized().adjusted(-2.0, -2.0, 2.0, 2.0);
+
+        painter.save();
+        // 虛線外框、不填色。填色會蓋掉被選中的那則註解本身，而使用者選它
+        // 通常正是為了看清楚它。虛線則讓「這是選取狀態」與「這是文件內容」
+        // 不會被混淆——實線方框在工程圖上本來就到處都是。
+        QPen pen(QColor(0x1E, 0x90, 0xFF));
+        pen.setWidth(2);
+        pen.setStyle(Qt::DashLine);
+        painter.setPen(pen);
+        painter.setBrush(Qt::NoBrush);
+        painter.drawRect(rect);
+        painter.restore();
+        return;
+    }
+}
+
 void PageView::paintFormFieldHighlights(QPainter& painter, const domain::RectI& visible) const {
     if (!highlightFields_ || fieldRects_.empty()) return;
 
@@ -654,6 +694,12 @@ void PageView::updateToolCursor() {
         viewport()->setCursor(Qt::OpenHandCursor);
         return;
     }
+    if (tool_ == Tool::SelectComment) {
+        // 箭頭：這個工具選的是物件不是文字，也不畫東西。十字準星會讓人
+        // 以為可以拖出一個形狀。
+        viewport()->setCursor(Qt::ArrowCursor);
+        return;
+    }
     // 十字準星是自畫游標（PRD-UI-018）：系統的指標大小設定不會幫我們縮放
     // 一張自己畫的點陣圖，必須依使用者選的等級與目前螢幕 DPI 自行重畫。
     viewport()->setCursor(
@@ -699,6 +745,13 @@ void PageView::mousePressEvent(QMouseEvent* event) {
             return;
         }
         emit pageClicked(hit.pageIndex, hit.pagePoint);
+    }
+
+    // 選取註解工具：只回報點了哪裡，不進入拖曳也不碰選取。命中測試在應用層
+    // ——PageView 不認識註解，那條規則在這個工具上也不破例。
+    if (tool_ == Tool::SelectComment) {
+        emit pageClicked(hit.pageIndex, hit.pagePoint);
+        return;
     }
 
     dragging_ = true;
@@ -857,6 +910,13 @@ void PageView::mouseDoubleClickEvent(QMouseEvent* event) {
     }
     const PageHit hit = hitTest(event->pos());
     if (hit.pageIndex < 0) return;
+
+    // 選取註解工具的雙擊是「開啟這則註解」，不是選詞。
+    if (tool_ == Tool::SelectComment) {
+        emit pageDoubleClicked(hit.pageIndex, hit.pagePoint);
+        return;
+    }
+
     // 雙擊選詞（PRD-TXT-004）。
     //
     // 三擊選行沒有對應的 Qt 事件——Qt 送的序列是
@@ -1111,6 +1171,8 @@ void PageView::paintEvent(QPaintEvent* event) {
     paintPendingVertices(painter, visible);
     paintPendingStroke(painter, visible);
     paintFormFieldHighlights(painter, visible);
+    // 強調框畫在最後：它是選取回饋，必須蓋在所有內容之上才看得見。
+    paintHighlightedRect(painter, visible);
     paintSelection(painter, visible);
 
     // 拖曳中的形狀預覽。畫在最後，蓋在圖磚與選取之上。

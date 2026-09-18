@@ -6,6 +6,8 @@
 #include <QFile>
 #include <QFileInfo>
 
+#include <algorithm>
+
 #include "engine/pageops/page_boxes.h"
 #include "engine/pageops/page_merge.h"
 #include "engine/pageops/page_overlay.h"
@@ -369,6 +371,58 @@ PageOperationResult PageOperationsService::splitDocument(const QString& path, in
     result.pageCount = static_cast<int>(split.outputs.size());
     result.message = tr("已分割成 %1 個檔案").arg(split.outputs.size());
     return result;
+}
+
+PageOperationResult PageOperationsService::duplicatePages(const QString& path,
+                                                          const std::vector<int>& pages,
+                                                          int destinationIndex, RewriteConsent) {
+    PageOperationResult result;
+    if (pages.empty()) {
+        result.message = tr("沒有要複製的頁面");
+        return result;
+    }
+
+    QByteArray source;
+    if (!readAll(path, &source, &result.message)) return result;
+
+    engine::pages::PageEditor editor;
+    if (!editor.open(path.toStdString(), "")) {
+        result.message = tr("無法解析文件結構");
+        return result;
+    }
+
+    // -1：插在最後一個來源頁的正後方。逐頁各自插在自己後面聽起來更直覺，
+    // 但那需要在每插一頁之後重算後面所有頁碼——那個算式一旦寫錯，症狀是
+    // 「複製三頁，結果第二個複本插錯位置」，而兩頁的測試完全看不出來。
+    int target = destinationIndex;
+    if (target < 0) {
+        target = *std::max_element(pages.begin(), pages.end()) + 1;
+    }
+
+    const engine::pages::PageEditResult duplicated = editor.duplicatePages(pages, target);
+    if (!duplicated.ok()) {
+        result.message = tr("複製頁面失敗：%1").arg(QString::fromStdString(duplicated.message));
+        return result;
+    }
+
+    const QString temporary = path + QStringLiteral(".duplicate");
+    const engine::pages::PageSaveResult saved =
+        editor.saveAsCopy(temporary.toStdString(), engine::save::SaveOptions{});
+    if (!saved.ok()) {
+        QFile::remove(temporary);
+        result.message = tr("寫檔失敗");
+        return result;
+    }
+
+    QByteArray rewritten;
+    if (!readAll(temporary, &rewritten, &result.message)) {
+        QFile::remove(temporary);
+        return result;
+    }
+    QFile::remove(temporary);
+
+    return writeBack(path, source, toStd(rewritten), editor.pageCount(),
+                     tr("已複製 %1 頁").arg(pages.size()));
 }
 
 PageOperationResult PageOperationsService::resizePages(const QString& path,

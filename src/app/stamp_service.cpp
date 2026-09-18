@@ -24,6 +24,10 @@
 namespace alioth::app {
 namespace {
 
+// 我們加的戳記內容串流的私有標記鍵。ISO 32000-2 §7.3.7 要求檢視器忽略
+// 不認識的鍵，所以帶著它的檔案在任何檢視器裡都與沒帶一樣。
+constexpr const char* kStampMarkerKey = "Alioth_Stamp";
+
 constexpr const char* kFontResource = "AliothStampF0";
 constexpr const char* kBaseFont = "Helvetica";
 // CJK 字型的資源名稱（ADR-007）。名字刻意帶前綴：頁面上很可能已經有一個
@@ -138,6 +142,9 @@ StampResult StampService::applyStamps(const StampRequest& request) {
     font.resourceName = kFontResource;
     font.baseFont = kBaseFont;
     options.fonts.push_back(font);
+    // 標記讓「移除所有頁面標記」找得回這些串流。沒有它就只能回頭剖析運算子
+    // 並猜哪一段是我們加的，而猜錯會刪掉使用者原本的內容。
+    options.markerKey = kStampMarkerKey;
 
     const QFileInfo info(request.path);
     const QDateTime now = QDateTime::currentDateTime();
@@ -273,6 +280,71 @@ StampResult StampService::applyStamps(const StampRequest& request) {
     result.batesNumbers = std::move(bates);
     result.message = tr("已在 %1 頁蓋上戳記（增量 %2 位元組）")
                          .arg(result.stampedPages)
+                         .arg(built.appendedBytes);
+    return result;
+}
+
+StampResult StampService::removeStamps(const QString& path) {
+    StampResult result;
+
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly)) {
+        result.message = tr("無法讀取檔案：%1").arg(source.errorString());
+        return result;
+    }
+    const QByteArray original = source.readAll();
+    source.close();
+
+    result.previousSize = static_cast<quint64>(original.size());
+    result.boundaryGuard = boundaryHashOf(original);
+
+    engine::objects::IncrementalAppender appender;
+    std::string diagnostic;
+    if (appender.open(std::string(original.constData(),
+                                  static_cast<std::size_t>(original.size())),
+                      &diagnostic) != engine::objects::SourceStatus::Ok) {
+        result.message = tr("無法解析文件：%1").arg(QString::fromStdString(diagnostic));
+        return result;
+    }
+
+    const engine::objects::RemoveMarkedResult removed =
+        engine::objects::removeMarkedPageContent(appender, kStampMarkerKey);
+    if (!removed.ok) {
+        result.message = tr("移除失敗：%1").arg(QString::fromStdString(removed.diagnostic));
+        return result;
+    }
+    if (removed.removedReferences == 0) {
+        // 一個都沒找到就不寫檔。空的附加段只會讓簽章狀態從「有效」變成
+        // 「簽署後有變更」，而使用者什麼都沒得到。
+        result.message = tr("這份文件沒有本程式加過的頁面標記");
+        return result;
+    }
+
+    const engine::objects::BuildResult built = appender.build();
+    if (!built.ok) {
+        result.message = tr("增量儲存失敗：%1").arg(QString::fromStdString(built.diagnostic));
+        return result;
+    }
+
+    if (built.bytes.size() < static_cast<std::size_t>(original.size()) ||
+        std::memcmp(built.bytes.data(), original.constData(),
+                    static_cast<std::size_t>(original.size())) != 0) {
+        result.message = tr("儲存結果不是增量，已中止以保全簽章");
+        return result;
+    }
+
+    platform::AtomicFileWriter writer(path);
+    if (!writer.begin() || !writer.write(built.bytes.data(), built.bytes.size()) ||
+        !writer.commit()) {
+        result.message = tr("寫檔失敗");
+        return result;
+    }
+
+    result.ok = true;
+    result.stampedPages = removed.affectedPages;
+    result.message = tr("已從 %1 頁移除 %2 段頁面標記（增量 %3 位元組）")
+                         .arg(removed.affectedPages)
+                         .arg(removed.removedReferences)
                          .arg(built.appendedBytes);
     return result;
 }

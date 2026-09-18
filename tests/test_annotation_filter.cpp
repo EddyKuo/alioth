@@ -162,6 +162,54 @@ private slots:
             QCOMPARE(list[index].author, std::string("Bob"));
         }
     }
+
+    // 上一則／下一則註解（PDF-XChange 的 Previous / Next Comment）。
+    //
+    // 走文件順序而不是清單目前的排序：清單可以依作者或日期排，但「下一則」
+    // 在使用者心裡是「往文件後面走」。語料的輸入順序刻意與文件順序不同，
+    // 所以拿輸入順序當答案的實作在這裡會紅。
+    void adjacentWalksTheDocumentOrderNotTheInputOrder() {
+        const auto list = corpus();
+        // 文件順序：(0,0) typo → (0,1) layout → (1,0) ink → (2,0) check this
+        const auto order = filterAndSort(list, AnnotationFilter{}, AnnotationSortKey::Page, true);
+
+        std::size_t current = order[0];
+        for (std::size_t step = 1; step < order.size(); ++step) {
+            current = adjacentInDocumentOrder(list, current, 1);
+            QCOMPARE(current, order[step]);
+        }
+        // 往回也要走回同一條路。
+        for (std::size_t step = order.size() - 1; step > 0; --step) {
+            current = adjacentInDocumentOrder(list, current, -1);
+            QCOMPARE(current, order[step - 1]);
+        }
+    }
+
+    // 還沒有選取時：往後從第一則開始，往前從最後一則開始。
+    void adjacentStartsFromTheEndsWhenNothingIsSelected() {
+        const auto list = corpus();
+        const auto order = filterAndSort(list, AnnotationFilter{}, AnnotationSortKey::Page, true);
+        const std::size_t none = list.size();
+
+        QCOMPARE(adjacentInDocumentOrder(list, none, 1), order.front());
+        QCOMPARE(adjacentInDocumentOrder(list, none, -1), order.back());
+    }
+
+    // 到頭與到尾不繞回去。繞回去的話，使用者連按到底會不知不覺回到第一則，
+    // 以為自己漏看了中間幾則又走一遍。
+    void adjacentDoesNotWrapAround() {
+        const auto list = corpus();
+        const auto order = filterAndSort(list, AnnotationFilter{}, AnnotationSortKey::Page, true);
+
+        QCOMPARE(adjacentInDocumentOrder(list, order.back(), 1), list.size());
+        QCOMPARE(adjacentInDocumentOrder(list, order.front(), -1), list.size());
+    }
+
+    void adjacentOnAnEmptyListIsHarmless() {
+        const std::vector<AnnotationSummary> empty;
+        QCOMPARE(adjacentInDocumentOrder(empty, 0, 1), std::size_t(0));
+        QCOMPARE(adjacentInDocumentOrder(empty, 0, -1), std::size_t(0));
+    }
 };
 
 QTEST_APPLESS_MAIN(TestAnnotationFilter)

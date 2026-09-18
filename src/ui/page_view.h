@@ -70,6 +70,15 @@ enum class Tool {
     // 鉛筆（PRD-ANN-003）。拖曳過程逐點收集，並記下每一點的壓力——
     // 有數位板時取自 QTabletEvent，滑鼠一律回報 1.0。
     Pencil,
+    // 選取註解。點一下選中游標下的那一則，雙擊開啟它的註釋視窗。
+    //
+    // 與 Select 分開是必要的：Select 工具的主要意圖是選字，若它同時吃掉
+    // 「點在螢光筆上」的情形，使用者就沒有辦法從一段已標記的文字開始選取。
+    // 兩個意圖互斥，所以分成兩個工具，這也是 PDF-XChange 的做法。
+    //
+    // PageView 仍然**不認識註解**：命中測試在應用層（它才有註解清單），
+    // 這裡只負責把點擊位置送出去，並畫出應用層指定的強調框。
+    SelectComment,
 };
 
 class PageView : public QAbstractScrollArea {
@@ -145,6 +154,13 @@ public:
     [[nodiscard]] const domain::GridSettings& grid() const noexcept { return grid_; }
     void setSnapEnabled(bool enabled);
 
+    // 強調框（「選取註解」工具的選取回饋）。矩形由呼叫端提供，理由與表單欄位
+    // 標示相同：PageView 不認識註解，而命中測試需要註解清單。
+    // 傳 pageIndex < 0 代表清除。純疊加，不改文件。
+    void setHighlightedRect(int pageIndex, const domain::RectF& pageRect);
+    void clearHighlightedRect();
+    [[nodiscard]] int highlightedPage() const noexcept { return highlightPage_; }
+
     // 表單欄位標示（PRD-FORM-004）。矩形由呼叫端提供——PageView 不認識表單，
     // 而欄位幾何來自 FormController 那條非同步路徑。這是純疊加，不改文件。
     void setFormFieldHighlight(bool enabled);
@@ -187,6 +203,9 @@ signals:
     // 會吃掉事件的分支。註釋視窗（PRD-ANN-004）用它判斷點到了哪一則註解；
     // 命中測試不放在這裡，因為 PageView 刻意不認識註解。
     void pageClicked(int pageIndex, const alioth::domain::PointF& pagePoint);
+    // 使用者用「選取註解」工具雙擊。與 pageClicked 分開：單擊是選取、
+    // 雙擊是開啟，兩者的後果不同，合成一個訊號會讓接收端得自己記時間。
+    void pageDoubleClicked(int pageIndex, const alioth::domain::PointF& pagePoint);
     // 觸控長按達到門檻時發出（PRD-UI-013：長按等同右鍵開選單）。呈現層只負責
     // 偵測手勢，選單內容交給持有 PageView 的容器決定——那需要知道命令匯流排、
     // 目前選取狀態等這個元件刻意不認識的東西。
@@ -237,6 +256,7 @@ private:
     // 鉛筆的即時預覽。線寬跟著壓力變化，讓使用者當下就看得到力道的效果。
     void paintPendingStroke(QPainter& painter, const domain::RectI& visible) const;
     void paintFormFieldHighlights(QPainter& painter, const domain::RectI& visible) const;
+    void paintHighlightedRect(QPainter& painter, const domain::RectI& visible) const;
     // 結束多邊形／折線的收集並發出訊號。commit 為 false 代表取消（Esc）。
     void finishVertexDrawing(bool commit);
     // 更新可及性描述並通知輔助技術。翻頁與縮放都要呼叫——
@@ -282,6 +302,9 @@ private:
     // 表單欄位標示：(頁碼, 頁面座標矩形)。
     bool highlightFields_{false};
     std::vector<std::pair<int, domain::RectF>> fieldRects_;
+    // 強調框。-1 代表沒有。
+    int highlightPage_{-1};
+    domain::RectF highlightRect_{};
 
     domain::PointF shapeAnchor_{};
     domain::PointF shapeCurrent_{};

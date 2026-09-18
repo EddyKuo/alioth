@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <variant>
 
 #include "engine/objects/page_object_editor.h"
 
@@ -87,8 +88,12 @@ ContentAppendResult appendPageContent(IncrementalAppender& appender, int pageInd
     if (!data.empty() && data.back() != '\n') data += '\n';
     if (options.wrapInGraphicsState) data += "Q\n";
 
+    PdfDictionary streamDict;
+    if (!options.markerKey.empty()) streamDict.set(options.markerKey, PdfObject{true});
+
     const int contentNumber = appender.allocateObject();
-    appender.setObject(contentNumber, PdfObject{PdfStream{PdfDictionary{}, std::move(data)}});
+    appender.setObject(contentNumber,
+                       PdfObject{PdfStream{std::move(streamDict), std::move(data)}});
 
     const PageEditStatus status =
         appendToPageArray(appender, pageRef, "Contents", makeRef(contentNumber));
@@ -96,6 +101,68 @@ ContentAppendResult appendPageContent(IncrementalAppender& appender, int pageInd
 
     result.ok = true;
     result.contentObject = contentNumber;
+    return result;
+}
+
+RemoveMarkedResult removeMarkedPageContent(IncrementalAppender& appender,
+                                           const std::string& markerKey) {
+    RemoveMarkedResult result;
+    if (!appender.isOpen()) {
+        result.diagnostic = "附加器尚未開啟原檔";
+        return result;
+    }
+    if (markerKey.empty()) {
+        result.diagnostic = "標記鍵是空的";
+        return result;
+    }
+
+    const auto& pages = appender.source().pages();
+    for (std::size_t i = 0; i < pages.size(); ++i) {
+        const PdfRef& page = pages[i];
+        const PdfObject pageObject = appender.currentObject(page.number);
+        const PdfDictionary* pageDict = pageObject.asDictionary();
+        if (pageDict == nullptr) continue;
+
+        const PdfObject* contents = pageDict->find("Contents");
+        if (contents == nullptr) continue;
+
+        // /Contents 可以是單一參照或陣列。單一參照的情形不可能是我們加的
+        // （我們一律用 appendToPageArray，它會把單一參照升成陣列），
+        // 但還是要處理——別的工具產生的檔案可能長成任何樣子。
+        std::vector<int> candidates;
+        if (contents->isRef()) {
+            candidates.push_back(contents->asRef().number);
+        } else if (const PdfArray* array = contents->asArray(); array != nullptr) {
+            for (const PdfObject& item : *array) {
+                if (item.isRef()) candidates.push_back(item.asRef().number);
+            }
+        }
+
+        bool touched = false;
+        for (const int number : candidates) {
+            const PdfObject stream = appender.currentObject(number);
+            const PdfStream* asStream = stream.asStream();
+            if (asStream == nullptr) continue;
+            const PdfObject* marker = asStream->dict.find(markerKey);
+            // 只認 true。留 false 的話代表有人刻意停用過這個標記，
+            // 而我們不知道他為什麼那樣做——不要替他決定。
+            if (marker == nullptr) continue;
+            const bool* flag = std::get_if<bool>(&marker->value());
+            if (flag == nullptr || !*flag) continue;
+
+            const PageEditStatus status =
+                removeFromPageArray(appender, page, "Contents", number);
+            if (!status.ok) {
+                result.diagnostic = "移除 /Contents 參照失敗：" + status.diagnostic;
+                return result;
+            }
+            ++result.removedReferences;
+            touched = true;
+        }
+        if (touched) ++result.affectedPages;
+    }
+
+    result.ok = true;
     return result;
 }
 

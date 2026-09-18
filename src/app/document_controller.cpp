@@ -526,6 +526,14 @@ void DocumentController::setTransparencyGrid(bool enabled) {
     emit pageGeometryChanged();
 }
 
+void DocumentController::setAnnotationsVisible(bool visible) {
+    if (renderOptions_.drawAnnotations == visible) return;
+    renderOptions_.drawAnnotations = visible;
+    ++renderGeneration_;
+    cache_.clear();
+    emit pageGeometryChanged();
+}
+
 void DocumentController::setRenderQuality(bool grayscale, bool smoothPaths,
                                           bool smoothText, bool smoothImages) {
     if (renderOptions_.grayscale == grayscale && renderOptions_.strokeAdjust == !smoothPaths &&

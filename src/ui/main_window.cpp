@@ -434,8 +434,35 @@ MainWindow::MainWindow(QWidget* parent)
     // 命中測試在這裡而不是 PageView 裡，因為 PageView 刻意不認識註解。
     connect(pageView_, &PageView::pageClicked, this,
             [this](int pageIndex, const domain::PointF& pagePoint) {
+                if (pageView_->tool() == Tool::SelectComment) {
+                    // 點在空白處就取消選取。保留上一個選取會讓「刪除」作用在
+                    // 一則使用者已經不認為自己選著的註解上。
+                    selectAnnotation(annotationAtForSelection(pageIndex, pagePoint));
+                    return;
+                }
                 const std::size_t index = annotationAt(pageIndex, pagePoint);
                 if (index < controller_->annotations().size()) openNotePopup(index);
+            });
+
+    // Delete 作用在頁面上（「選取註解」工具選中之後）。掛在 pageView_ 而不是
+    // 視窗層級：焦點在頁面上按 Delete 的意圖是刪掉選中的註解，而清單也有
+    // 一個同名動作——掛在視窗層級兩者會互搶。
+    auto* deleteOnPageAction = new QAction(tr("刪除選取的註解"), pageView_);
+    deleteOnPageAction->setShortcut(QKeySequence::Delete);
+    deleteOnPageAction->setShortcutContext(Qt::WidgetShortcut);
+    pageView_->addAction(deleteOnPageAction);
+    connect(deleteOnPageAction, &QAction::triggered, this, [this] {
+        if (pageView_->tool() != Tool::SelectComment) return;
+        if (selectedAnnotation_ >= controller_->annotations().size()) return;
+        deleteSelectedAnnotation();
+    });
+
+    connect(pageView_, &PageView::pageDoubleClicked, this,
+            [this](int pageIndex, const domain::PointF& pagePoint) {
+                const std::size_t index = annotationAtForSelection(pageIndex, pagePoint);
+                if (index >= controller_->annotations().size()) return;
+                selectAnnotation(index);
+                openNotePopup(index);
             });
 
     // PRD-TXT-003 / PRD-TXT-005：框選之後做什麼，取決於目前是哪個工具。
@@ -523,6 +550,9 @@ MainWindow::MainWindow(QWidget* parent)
 
     connect(pageView_, &PageView::pageChanged, this, [this](int index) {
         pageLabel_->setText(tr("第 %1 / %2 頁").arg(index + 1).arg(controller_->pageCount()));
+        // 翻頁之後尺寸可能不同（混合尺寸的文件很常見），但游標未必在頁面上，
+        // 所以只更新尺寸那一半。
+        updateGeometryLabel(index, nullptr);
         // Order 面板的比對是逐頁的（PRD-A11Y-002），換頁要重算。
         orderPanel_->setPageIndex(index);
         // 連結是逐頁向引擎要的。面板收起來時不要求——翻頁本來就在跟渲染
@@ -747,6 +777,36 @@ void MainWindow::buildActions() {
     connect(summarySideBySideAction, &QAction::triggered, this,
             [this] { exportDocumentWithSummary(SummaryLayout::SideBySide); });
 
+    // 上一則／下一則註解（PDF-XChange 的 Previous / Next Comment）。
+    // 審閱一份兩百則註解的文件時，這是最常按的兩個鍵——沒有它，使用者
+    // 只能在清單面板上逐列點，而清單的排序未必是文件順序。
+    commentMenu->addSeparator();
+    auto* previousCommentAction = commentMenu->addAction(tr("上一則註解"));
+    previousCommentAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Comma));
+    registerRibbonAction(QStringLiteral("comment.previous"), previousCommentAction);
+    connect(previousCommentAction, &QAction::triggered, this,
+            [this] { goToAdjacentAnnotation(-1); });
+
+    auto* nextCommentAction = commentMenu->addAction(tr("下一則註解"));
+    nextCommentAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Period));
+    registerRibbonAction(QStringLiteral("comment.next"), nextCommentAction);
+    connect(nextCommentAction, &QAction::triggered, this, [this] { goToAdjacentAnnotation(1); });
+
+    // 顯示／隱藏所有註解（PDF-XChange 的 Show Comments）。
+    //
+    // 這是純檢視選項，不改文件——關掉之後看到的是「原稿長什麼樣」，
+    // 那是審閱到一半最常需要的一個對照。實作是 FPDF_ANNOT 旗標，
+    // 因此連表單欄位的外觀也會一起隱藏，這與 Acrobat 的行為一致。
+    auto* showAnnotationsAction = commentMenu->addAction(tr("顯示所有註解"));
+    showAnnotationsAction->setCheckable(true);
+    showAnnotationsAction->setChecked(true);
+    registerRibbonAction(QStringLiteral("comment.showAll"), showAnnotationsAction);
+    connect(showAnnotationsAction, &QAction::toggled, this, [this](bool on) {
+        controller_->setAnnotationsVisible(on);
+        statusBar()->showMessage(on ? tr("已顯示所有註解") : tr("已隱藏所有註解（不影響檔案）"),
+                                 4000);
+    });
+
     // 攤平註解（PRD-ANN-013）。放在摘要下面而不是與匯入匯出並列：後兩者是
     // 可逆的資料搬運，攤平之後那些標記在任何檢視器裡都不再是註解。
     auto* flattenAction = commentMenu->addAction(tr("攤平註解(&F)..."));
@@ -782,6 +842,11 @@ void MainWindow::buildActions() {
     addTool(tr("選取文字"), Tool::Select, QStringLiteral("tool.select"),
             QKeySequence(Qt::Key_V), true);
     addTool(tr("手形"), Tool::Hand, QStringLiteral("tool.hand"), QKeySequence(Qt::Key_H), false);
+    // 選取註解（PDF-XChange 的 Select Comments Tool）。與「選取文字」分成兩個
+    // 工具而不是讓選取工具兼差：選取工具點在螢光筆上時的意圖是從那裡開始選字，
+    // 兩個意圖互斥。快捷鍵 C 對齊 PDF-XChange。
+    addTool(tr("選取註解"), Tool::SelectComment, QStringLiteral("tool.selectComments"),
+            QKeySequence(Qt::Key_C), false);
     addTool(tr("快照"), Tool::Snapshot, QStringLiteral("tool.snapshot"), QKeySequence(), false);
     registerRibbonAction(
         QStringLiteral("protect.redactMark"),
@@ -1189,6 +1254,57 @@ void MainWindow::buildActions() {
         if (presentation_.handleEscape()) applyViewMode();
     });
 
+    // 跳頁（PDF-XChange 的 View / Go To 群組）。
+    //
+    // 鍵盤本來就走得到（Home / End / PageUp / PageDown 由檢視區處理），
+    // 但只有鍵盤走得到等於沒有：使用者要先知道有這回事。四個動作同時是
+    // Ribbon 按鈕的接點，而且跟著文件開關啟用停用。
+    viewMenu->addSeparator();
+    const auto addGoTo = [&](const QString& text, const QString& id,
+                             const QKeySequence& shortcut, auto&& resolvePage) {
+        auto* action = viewMenu->addAction(text);
+        if (!shortcut.isEmpty()) action->setShortcut(shortcut);
+        registerRibbonAction(id, action);
+        connect(action, &QAction::triggered, this,
+                [this, resolvePage = std::forward<decltype(resolvePage)>(resolvePage)] {
+                    if (!controller_->isOpen() || controller_->pageCount() <= 0) return;
+                    const int target = resolvePage();
+                    if (target < 0 || target >= controller_->pageCount()) return;
+                    navigateToPage(target);
+                });
+        return action;
+    };
+
+    addGoTo(tr("第一頁"), QStringLiteral("nav.firstPage"),
+            QKeySequence(Qt::CTRL | Qt::Key_Home), [] { return 0; });
+    addGoTo(tr("上一頁"), QStringLiteral("nav.previousPage"),
+            QKeySequence(Qt::CTRL | Qt::Key_PageUp),
+            [this] { return pageView_->pageIndex() - 1; });
+    addGoTo(tr("下一頁"), QStringLiteral("nav.nextPage"),
+            QKeySequence(Qt::CTRL | Qt::Key_PageDown),
+            [this] { return pageView_->pageIndex() + 1; });
+    addGoTo(tr("最後一頁"), QStringLiteral("nav.lastPage"),
+            QKeySequence(Qt::CTRL | Qt::Key_End),
+            [this] { return controller_->pageCount() - 1; });
+
+    // 指定頁碼。500 頁的文件靠捲動找第 317 頁是不可行的，而這是
+    // PDF-XChange 的 Go To 群組裡使用頻率最高的一個。
+    auto* goToPageAction = viewMenu->addAction(tr("跳至頁碼..."));
+    goToPageAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+    registerRibbonAction(QStringLiteral("nav.goToPage"), goToPageAction);
+    connect(goToPageAction, &QAction::triggered, this, [this] {
+        if (!controller_->isOpen() || controller_->pageCount() <= 0) {
+            QMessageBox::information(this, tr("跳至頁碼"), tr("尚未開啟文件"));
+            return;
+        }
+        bool accepted = false;
+        const int page = QInputDialog::getInt(this, tr("跳至頁碼"), tr("頁碼："),
+                                              pageView_->pageIndex() + 1, 1,
+                                              controller_->pageCount(), 1, &accepted);
+        if (!accepted) return;
+        navigateToPage(page - 1);
+    });
+
     // 瀏覽歷史前進後退（PRD-NAV-001）。
     //
     // Alt+方向鍵是瀏覽器與 Acrobat 共用的慣例，使用者不必學。
@@ -1542,10 +1658,23 @@ void MainWindow::buildDockPanels() {
     // 點選跳頁時查的是**篩選後那一列對應的原始索引**，不是清單列號。
     // 直接拿列號去索引原陣列，是「點了第 3 列卻跳到第 7 則」的來源。
     connect(annotationList_, &QListWidget::currentRowChanged, this, [this](int row) {
-        if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) return;
+        if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) {
+            selectedAnnotation_ = static_cast<std::size_t>(-1);
+            if (pageView_ != nullptr) pageView_->clearHighlightedRect();
+            return;
+        }
         const auto& items = controller_->annotations();
         const std::size_t index = annotationOrder_[static_cast<std::size_t>(row)];
-        if (index < items.size()) navigateToPage(items[index].pageIndex);
+        if (index >= items.size()) return;
+        // 清單與頁面上的選取是同一件事的兩個視圖：在清單上點一列，頁面上
+        // 那一則也要框起來，否則使用者得自己在頁面上找它在哪。
+        // 這裡直接寫欄位而不是呼叫 selectAnnotation()，避免它再回頭設一次
+        // 目前列——那會讓這個處理函式看起來像會遞迴。
+        selectedAnnotation_ = index;
+        if (pageView_ != nullptr) {
+            pageView_->setHighlightedRect(items[index].pageIndex, items[index].rect);
+        }
+        navigateToPage(items[index].pageIndex);
     });
 
     // 雙擊清單開啟註釋視窗（PRD-ANN-004 的「雙向連結」之一）。用雙擊而不是單擊：
@@ -1748,6 +1877,7 @@ void MainWindow::buildDockPanels() {
                           loupePanel_);
     connect(pageView_, &PageView::cursorMoved, this,
             [this](int pageIndex, const alioth::domain::PointF& pagePoint) {
+                updateGeometryLabel(pageIndex, &pagePoint);
                 if (loupeDock_ == nullptr || !loupeDock_->isVisible()) return;
                 loupePanel_->updateCursor(pageIndex, pagePoint, pageView_->scale());
             });
@@ -2117,6 +2247,69 @@ std::size_t MainWindow::annotationAt(int pageIndex, const domain::PointF& pagePo
         if (item.rect.contains(pagePoint)) return i - 1;
     }
     return items.size();
+}
+
+std::size_t MainWindow::annotationAtForSelection(int pageIndex,
+                                                 const domain::PointF& pagePoint) const {
+    const auto& items = controller_->annotations();
+    // 由後往前：/Annots 的順序就是繪製順序，後面的畫在上面，
+    // 使用者點到重疊處時期待選到看得見的那一則。
+    for (std::size_t i = items.size(); i > 0; --i) {
+        const domain::AnnotationSummary& item = items[i - 1];
+        if (item.pageIndex != pageIndex) continue;
+        // Popup 不算：它是別則註解的附屬視窗，不是一則可以獨立選取的標記。
+        // 選到它的話，畫面上會出現一個框住空白處的強調框。
+        if (item.subtype == "Popup") continue;
+        if (item.rect.normalized().contains(pagePoint)) return i - 1;
+    }
+    return items.size();
+}
+
+void MainWindow::selectAnnotation(std::size_t index) {
+    const auto& items = controller_->annotations();
+    if (index >= items.size()) {
+        selectedAnnotation_ = static_cast<std::size_t>(-1);
+        pageView_->clearHighlightedRect();
+        return;
+    }
+
+    selectedAnnotation_ = index;
+    const domain::AnnotationSummary& item = items[index];
+    pageView_->setHighlightedRect(item.pageIndex, item.rect);
+
+    // 清單上同步選起來。找不到是正常的——目前的篩選條件可能把它濾掉了；
+    // 那時只留強調框，不去動使用者設好的篩選條件。
+    for (std::size_t row = 0; row < annotationOrder_.size(); ++row) {
+        if (annotationOrder_[row] == index) {
+            annotationList_->setCurrentRow(static_cast<int>(row));
+            break;
+        }
+    }
+    navigateToPage(item.pageIndex);
+    statusBar()->showMessage(tr("已選取第 %1 頁的%2（%3）")
+                                 .arg(item.pageIndex + 1)
+                                 .arg(QString::fromStdString(item.subtype))
+                                 .arg(item.author.empty() ? tr("未署名")
+                                                          : QString::fromStdString(item.author)),
+                             4000);
+}
+
+void MainWindow::goToAdjacentAnnotation(int direction) {
+    const auto& items = controller_->annotations();
+    if (items.empty()) {
+        statusBar()->showMessage(tr("這份文件沒有註解"), 3000);
+        return;
+    }
+
+    const std::size_t next =
+        domain::adjacentInDocumentOrder(items, selectedAnnotation_, direction);
+    if (next >= items.size()) {
+        statusBar()->showMessage(direction > 0 ? tr("已經是最後一則註解")
+                                               : tr("已經是第一則註解"),
+                                 3000);
+        return;
+    }
+    selectAnnotation(next);
 }
 
 void MainWindow::openNotePopup(std::size_t index) {
@@ -2947,6 +3140,34 @@ void MainWindow::deletePagesByRange() {
     });
 }
 
+void MainWindow::duplicatePagesByRange() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) return;
+    if (!controller_->info().permissions.assemble) {
+        QMessageBox::warning(this, tr("複製頁面"), tr("此文件的權限設定不允許重組頁面"));
+        return;
+    }
+
+    bool accepted = false;
+    const QString text = QInputDialog::getText(
+        this, tr("複製頁面"),
+        tr("要複製哪幾頁？（例如 1,3,5-8，共 %1 頁）").arg(controller_->pageCount()),
+        QLineEdit::Normal, QString::number(pageView_->pageIndex() + 1), &accepted);
+    if (!accepted) return;
+
+    const std::vector<int> pages = parsePageRange(text);
+    if (pages.empty()) {
+        QMessageBox::warning(this, tr("複製頁面"), tr("頁碼範圍不合法或超出文件頁數"));
+        return;
+    }
+    if (!confirmRewrite(tr("複製頁面"))) return;
+
+    commitPageOperation(tr("複製頁面"), [this, pages] {
+        // -1：插在最後一個來源頁的正後方。
+        return pageOps_->duplicatePages(currentPath_, pages, -1,
+                                        app::RewriteConsent::confirmed());
+    });
+}
+
 void MainWindow::extractPagesByRange() {
     if (currentPath_.isEmpty() || !controller_->isOpen()) return;
     if (!controller_->info().permissions.assemble) {
@@ -3557,10 +3778,16 @@ void MainWindow::pasteAnnotations() {
 }
 
 void MainWindow::deleteSelectedAnnotation() {
-    const int row = annotationList_->currentRow();
-    if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) return;
     const auto& items = controller_->annotations();
-    const std::size_t index = annotationOrder_[static_cast<std::size_t>(row)];
+    // 頁面上的選取優先於清單的目前列：用「選取註解」工具點中的那一則可能
+    // 被清單目前的篩選條件濾掉，這時清單的目前列指的是別則註解——
+    // 刪掉它會是一個完全無法預期的結果。
+    std::size_t index = selectedAnnotation_;
+    if (index >= items.size()) {
+        const int row = annotationList_->currentRow();
+        if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) return;
+        index = annotationOrder_[static_cast<std::size_t>(row)];
+    }
     if (index >= items.size()) return;
     if (!confirmNoExternalChange(tr("刪除註解"))) return;
 
@@ -4268,6 +4495,37 @@ void MainWindow::buildPanelActions() {
     registerRibbonAction(QStringLiteral("search.findNext"), findNextAction);
 }
 
+void MainWindow::updateGeometryLabel(int pageIndex, const domain::PointF* pagePoint) {
+    if (geometryLabel_ == nullptr) return;
+    if (!controller_->isOpen() || pageIndex < 0 || pageIndex >= controller_->pageCount()) {
+        geometryLabel_->clear();
+        return;
+    }
+
+    const domain::SizeF size = controller_->pageSizePt(pageIndex);
+    // 尚未問到真實尺寸時什麼都不顯示，而不是顯示 A4 佔位值——
+    // 顯示佔位值等於告訴使用者「這頁是 A4」，而那句話可能是錯的。
+    if (!controller_->pageGeometryKnown(pageIndex)) {
+        geometryLabel_->setText(tr("尺寸載入中"));
+        return;
+    }
+
+    // 毫米是工程圖與紙張規格通用的單位；點只有排版的人在看。
+    // 兩個都給，因為 PDF 的座標本身是點，量測與註解幾何都用它。
+    const double mmPerPt = 25.4 / 72.0;
+    const QString paper = tr("%1 × %2 mm")
+                              .arg(size.width * mmPerPt, 0, 'f', 1)
+                              .arg(size.height * mmPerPt, 0, 'f', 1);
+    if (pagePoint == nullptr) {
+        geometryLabel_->setText(paper);
+        return;
+    }
+    geometryLabel_->setText(tr("%1　游標 %2, %3 pt")
+                                .arg(paper)
+                                .arg(pagePoint->x, 0, 'f', 1)
+                                .arg(pagePoint->y, 0, 'f', 1));
+}
+
 void MainWindow::buildStatusBar() {
     pageLabel_ = new QLabel(tr("尚未開啟文件"), this);
     pageLabel_->setObjectName(QStringLiteral("statusPageLabel"));
@@ -4279,6 +4537,15 @@ void MainWindow::buildStatusBar() {
     // 使用者無法分辨那是縮放、頁碼還是進度。
     zoomLabel_->setAccessibleName(tr("縮放比例"));
 
+    // 頁面尺寸與游標位置（PDF-XChange 的 Show Page Size / Position）。
+    //
+    // 工程圖審閱時這兩個數字一直被用到：核對紙張是不是 A0、量一段距離
+    // 之前先確認座標。放在狀態列而不是浮動提示，是因為它要能被一直看著，
+    // 而浮動提示會跟著游標動、遮住正在看的東西。
+    geometryLabel_ = new QLabel(this);
+    geometryLabel_->setObjectName(QStringLiteral("statusGeometryLabel"));
+    geometryLabel_->setAccessibleName(tr("頁面尺寸與游標位置"));
+
     noticeLabel_ = new QLabel(this);
     noticeLabel_->setObjectName(QStringLiteral("statusNoticeLabel"));
     // 降級提示（XFA / JavaScript / 簽章）常駐在這裡。它是 PRD §13
@@ -4287,6 +4554,7 @@ void MainWindow::buildStatusBar() {
 
     statusBar()->addWidget(pageLabel_);
     statusBar()->addPermanentWidget(noticeLabel_);
+    statusBar()->addPermanentWidget(geometryLabel_);
     statusBar()->addPermanentWidget(zoomLabel_);
 }
 
@@ -5305,6 +5573,12 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     registerRibbonAction(QStringLiteral("page.delete"), deletePagesAction);
     connect(deletePagesAction, &QAction::triggered, this, [this] { deletePagesByRange(); });
 
+    // 複製頁面（PDF-XChange 的 Duplicate Page）。複本插在來源頁的正後方——
+    // 那是「複製這一頁」最常見的意圖。
+    auto* duplicatePagesAction = menu->addAction(tr("複製頁面..."));
+    registerRibbonAction(QStringLiteral("page.duplicate"), duplicatePagesAction);
+    connect(duplicatePagesAction, &QAction::triggered, this, [this] { duplicatePagesByRange(); });
+
     auto* extractPagesAction = menu->addAction(tr("擷取頁面另存..."));
     registerRibbonAction(QStringLiteral("page.extract"), extractPagesAction);
     connect(extractPagesAction, &QAction::triggered, this, [this] { extractPagesByRange(); });
@@ -5325,6 +5599,26 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
              QStringLiteral("page.headerFooter"));
     addStamp(tr("浮水印..."), StampDialog::Preset::Watermark, QStringLiteral("page.watermark"));
     addStamp(tr("Bates 編號..."), StampDialog::Preset::Bates, QStringLiteral("page.bates"));
+
+    // 移除所有頁面標記（PDF-XChange 的 Remove All）。只移除本程式加的——
+    // 判定依據是寫入時放進串流字典的私有標記鍵。別人加的浮水印移不掉，
+    // 那是正確的：移除它需要剖析內容串流並猜哪一段是浮水印。
+    auto* removeStampsAction = menu->addAction(tr("移除所有頁面標記"));
+    registerRibbonAction(QStringLiteral("page.removeStamps"), removeStampsAction);
+    connect(removeStampsAction, &QAction::triggered, this, [this] {
+        if (currentPath_.isEmpty() || !controller_->isOpen()) {
+            QMessageBox::information(this, tr("移除所有頁面標記"), tr("尚未開啟文件"));
+            return;
+        }
+        if (!confirmNoExternalChange(tr("移除所有頁面標記"))) return;
+        const app::StampResult result = stamps_->removeStamps(currentPath_);
+        if (!result.ok) {
+            QMessageBox::information(this, tr("移除所有頁面標記"), result.message);
+            return;
+        }
+        reloadCurrentDocument();
+        statusBar()->showMessage(result.message, 6000);
+    });
 
     // 旋轉頁面。與「向右旋轉檢視」是兩件事：這裡改的是檔案裡的 /Rotate，
     // 存檔後別人打開也是轉過的；檢視旋轉只影響這個視窗的顯示。

@@ -62,6 +62,32 @@ private slots:
         QVERIFY(!options.transparencyGrid);
     }
 
+    // 顯示／隱藏所有註解（PDF-XChange 的 Show Comments）。純檢視選項，
+    // 不改文件——關掉之後看到的是原稿長什麼樣。與夜間模式同樣不是圖磚鍵的
+    // 一部分，所以切換時一定要清快取，否則畫面會繼續顯示烘進去的舊圖磚。
+    void annotationVisibilityIsAViewOptionThatInvalidatesTiles() {
+        app::DocumentController controller;
+        QVERIFY2(controller.annotationsVisible(), "註解預設應該看得見");
+
+        QSignalSpy changed(&controller, &app::DocumentController::pageGeometryChanged);
+        controller.setAnnotationsVisible(false);
+        QVERIFY(!controller.annotationsVisible());
+        QVERIFY(!controller.renderOptions().drawAnnotations);
+        QCOMPARE(changed.count(), 1);
+
+        // 沒改就不要發訊號：選單每次開啟都會重設一次勾選狀態。
+        controller.setAnnotationsVisible(false);
+        QCOMPARE(changed.count(), 1);
+
+        controller.setAnnotationsVisible(true);
+        QVERIFY(controller.renderOptions().drawAnnotations);
+        QCOMPARE(changed.count(), 2);
+
+        // 這個開關不可以順手動到別的渲染選項。
+        QVERIFY(!controller.renderOptions().grayscale);
+        QVERIFY(!controller.renderOptions().nightMode);
+    }
+
     // 改了選項要作廢舊圖磚並通知呈現層重畫；沒改就不要發訊號。
     // 後者不是潔癖：每次發訊號都會觸發一輪重新排程，而顯示品質選單
     // 每次開啟都會重設一次勾選狀態。

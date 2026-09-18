@@ -123,6 +123,21 @@ private:
     // 頁面上被點到的那一則註解。找不到時回傳 annotations().size()。
     // 命中時取最上層（最後寫入）的那一則：後畫的蓋在先畫的上面。
     [[nodiscard]] std::size_t annotationAt(int pageIndex, const domain::PointF& pagePoint) const;
+    // 選取註解工具的命中測試：認所有子型，不只便利貼。
+    //
+    // 與 annotationAt() 分開是因為兩者服務的意圖相反：annotationAt() 是
+    // 「選取文字時順便看看點到哪則便利貼」，所以刻意只認便利貼；這一個是
+    // 「使用者明說要選註解」，所以全部都要認。
+    [[nodiscard]] std::size_t annotationAtForSelection(int pageIndex,
+                                                       const domain::PointF& pagePoint) const;
+    // 選中某一則註解：畫強調框、在清單上選起來、跳到那一頁。
+    // index 超出範圍代表取消選取。
+    void selectAnnotation(std::size_t index);
+    // 上一則／下一則註解（PDF-XChange 的 Previous / Next Comment）。
+    // 走的是文件順序（頁碼、頁內序號），不是清單目前的排序——使用者按
+    // 「下一則」時期待的是文件裡的下一則，不是「依作者排序後的下一列」。
+    void goToAdjacentAnnotation(int direction);
+    std::size_t selectedAnnotation_{static_cast<std::size_t>(-1)};
     void commitNoteContents(int pageIndex, int indexOnPage, const QString& contents);
     // 塗黑（PRD-ANN-032 / PRD-ANN-033）。標記可逆、套用不可逆，兩者刻意
     // 分成兩個動作而不是一個帶確認的動作——把它們合併，使用者一次按錯就
@@ -146,6 +161,7 @@ private:
     void splitDocument();
     // 刪除／擷取頁面（PRD-PAGE-002）。頁碼以「1,3,5-8」的範圍寫法輸入。
     void deletePagesByRange();
+    void duplicatePagesByRange();  // PDF-XChange 的 Duplicate Page
     void extractPagesByRange();
     // 解析使用者輸入的頁碼範圍，回傳 0 起算的頁碼；無效或超出範圍時回傳空。
     [[nodiscard]] std::vector<int> parsePageRange(const QString& text) const;
@@ -370,6 +386,10 @@ private:
     QToolBar* ribbonHost_{nullptr};
     QLabel* pageLabel_{nullptr};
     QLabel* zoomLabel_{nullptr};
+    // 頁面尺寸與游標位置。游標離開頁面時只留尺寸——把座標留在最後一個值上
+    // 會讓使用者以為游標還在那裡。
+    QLabel* geometryLabel_{nullptr};
+    void updateGeometryLabel(int pageIndex, const domain::PointF* pagePoint);
     QLabel* noticeLabel_{nullptr};
     QTreeWidget* outlineTree_{nullptr};
     QListWidget* thumbnailList_{nullptr};

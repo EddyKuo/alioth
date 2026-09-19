@@ -9,15 +9,21 @@
 
 | 想知道 | 看哪裡 |
 |---|---|
-| 產品要做什麼、不做什麼 | `PRD_跨平台專業PDF審閱工作站_v2.1.md`（需求的唯一真相來源） |
-| 做到哪裡了 | `docs/TRACEABILITY.md`（由 `python tools/traceability.py` 產生） |
-| 為什麼這樣設計 | `docs/SDD.md`、`.decisions/ADR_*.md` |
-| 為什麼某件事沒做 | `exceptions/EXC_*.md`（記的是「為什麼沒做」，不是「忘了做」） |
+| 產品要做什麼、不做什麼 | PRD v2.1（需求的唯一真相來源，**只在開發機上**，見下方說明） |
+| 做到哪裡了 | `docs/TRACEABILITY.md`（由 `python tools/traceability.py` 從 PRD 產生） |
+| 為什麼這樣設計 | `docs/SDD.md` |
+| 為什麼某件事沒做 | `docs/TRACEABILITY.md` 的備註欄（寫的是「做到什麼程度、哪裡沒做、為什麼」） |
 | 機器測不到的驗收怎麼做 | `docs/MANUAL_VERIFICATION.md`（Acrobat 相容性、螢幕閱讀器、TSA 等） |
 | 介面的設計意圖 | `docs/UX_CONCEPT.md` |
 | 在這個倉庫裡工作的規矩 | `CLAUDE.md` |
 
 進度請看勾稽矩陣，不要從程式碼行數或測試數量推測——那會高估。
+
+**不在這個倉庫裡的東西**：PRD 本體、`.decisions/`（ADR）、`exceptions/`（例外報告）、
+`.claude/`、`sprint/` 與 `.github/` 都只留在開發機（見 `.gitignore`）。因此
+`docs/TRACEABILITY.md` 重新產生不了（`tools/traceability.py` 讀的就是 PRD），
+`ci.bat` 的勾稽那一關必失敗，GitHub 端也不跑 CI。本文件與 `CLAUDE.md`、
+`docs/` 各處對 ADR 編號與 PRD 章節的引用，在這裡都指不到東西。
 
 ## 建置與測試
 
@@ -31,7 +37,8 @@ test.bat windows-x64-debug -R test_tile_cache    跑單一測試
 ci.bat                                           建置 → 測試 → 效能回歸 → 勾稽矩陣 → 分層檢查
 ```
 
-`ci.bat` 是合併前的門檻，五關全過才算數。環境需求與 PDFium 的取得方式見 `CLAUDE.md`。
+`ci.bat` 是合併前的門檻。注意勾稽矩陣那一關在這個倉庫裡過不了（PRD 不在版控裡），
+其餘四關照常。環境需求與 PDFium 的取得方式見 `CLAUDE.md`。
 
 ## 技術堆疊
 
@@ -51,7 +58,8 @@ Qt 6.8 LTS（LGPL 動態連結）＋ PDFium（預編譯，V8/XFA 已關閉）＋
 ```
 
 各層的邊界為什麼畫在這裡、以及四個決定架構形狀的硬性限制（PDFium 非執行緒安全、
-嚴禁整頁光柵化、零複製渲染的 stride、註解必須自產 /AP），見 `CLAUDE.md` 與 `docs/SDD.md`。
+嚴禁整頁光柵化、零複製渲染的 stride、註解必須自產 /AP），見 `CLAUDE.md` 的「架構」一節
+與 `docs/SDD.md`。
 
 ## 安全立場
 

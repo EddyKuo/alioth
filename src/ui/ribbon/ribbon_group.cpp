@@ -1,5 +1,7 @@
 #include "ui/ribbon/ribbon_group.h"
 
+#include <QMenu>
+
 #include <QAction>
 #include <QEvent>
 #include <QFontMetrics>
@@ -92,6 +94,21 @@ void RibbonGroupWidget::rebind(RibbonButton* button) {
     }
 
     button->setPlaceholder(false);
+
+    // 指向子選單的動作要真的彈出選單。
+    //
+    // QMenu::menuAction() 是一個合法的 QAction，註冊起來一切正常，但
+    // trigger() 對它只會發出 triggered——彈出選單是 QMenuBar 或
+    // QToolButton::setMenu 的行為，不是動作本身的。少了這一段，「最近使用」
+    // 「管理設定」「設定狀態」在 Ribbon 上按下去完全沒有反應，而在傳統選單
+    // 裡一切正常，於是這個缺陷只在預設介面上出現。
+    if (QMenu* menu = action->menu(); menu != nullptr) {
+        button->setMenu(menu);
+        button->setPopupMode(QToolButton::InstantPopup);
+    } else {
+        button->setMenu(nullptr);
+        button->setPopupMode(QToolButton::DelayedPopup);
+    }
     button->setEnabled(action->isEnabled());
     button->setCheckable(action->isCheckable());
     button->setChecked(action->isChecked());

@@ -51,6 +51,14 @@ target_include_directories(test_annotation_reply PRIVATE ${CMAKE_CURRENT_SOURCE_
 set_property(TEST test_annotation_reply APPEND PROPERTY
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# 改寫既有註解的屬性（PRD-ANN-009 的寫回路徑）。關鍵是沿用物件編號——
+# 換編號會讓既有回覆的 /IRT 指向孤兒，而那沒有任何錯誤訊息。
+set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app Alioth::objects Alioth::annotations)
+alioth_add_test(test_annotation_update test_annotation_update.cpp)
+target_include_directories(test_annotation_update PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../objects)
+set_property(TEST test_annotation_update APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 # 攤平（PRD-ANN-013）。核心是「攤平之後 /Annots 不能還留著那則註解」——
 # 留著的話同一個標記會出現兩份，而浮在上面的那一份照樣選得到、改得動。
 set(ALIOTH_TEST_LIBS Alioth::domain Alioth::app Alioth::objects Alioth::annotations)

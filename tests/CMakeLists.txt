@@ -152,6 +152,14 @@ alioth_add_test(test_thumbnail_panel test_thumbnail_panel.cpp pdf_fixture.h)
 set_property(TEST test_thumbnail_panel APPEND PROPERTY
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# 寫入之後的重載（UI-01 / UI-02 / UI-03）。回報的症狀是「每加一則註解就跳回第 1 頁」。
+alioth_add_test(test_ui_reload test_ui_reload.cpp pdf_fixture.h)
+target_include_directories(test_ui_reload PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+set_property(TEST test_ui_reload APPEND PROPERTY
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+# 這幾條要真的開檔、寫檔、重載，比一般 UI 測試慢。
+set_tests_properties(test_ui_reload PROPERTIES TIMEOUT 300)
+
 # 選取註解工具（對標 PDF-XChange 的 Select Comments Tool）。
 alioth_add_test(test_comment_selection_tool test_comment_selection_tool.cpp)
 set_property(TEST test_comment_selection_tool APPEND PROPERTY

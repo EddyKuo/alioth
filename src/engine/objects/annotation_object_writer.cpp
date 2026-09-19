@@ -380,7 +380,11 @@ AnnotationWriteResult writeAnnotation(IncrementalAppender& appender, int pageInd
     const Appearance appearance = annotations::generateAppearance(annotation, appearanceOptions);
     if (!appearance.valid) return failure("外觀串流產生失敗：" + appearance.diagnostic);
 
-    const int annotationNumber = appender.allocateObject();
+    // 就地改寫（屬性面板）與新增走同一條路，差別只在物件編號從哪裡來，
+    // 以及要不要掛上 /Annots。兩份幾乎一樣的程式碼必然會分岔，而分岔的
+    // 那一半寫出來的 /AP 會與另一半不同。
+    const bool replacing = options.replaceObject.has_value();
+    const int annotationNumber = replacing ? *options.replaceObject : appender.allocateObject();
     const int appearanceNumber = appender.allocateObject();
     // 回覆自己不帶 /Popup：Acrobat 以父註解的視窗顯示整條串，
     // 各自帶一個會讓回覆看起來像獨立註解，PRD-ANN-007 的驗收就過不了。
@@ -394,7 +398,11 @@ AnnotationWriteResult writeAnnotation(IncrementalAppender& appender, int pageInd
                                      writeType == AnnotationType::PolyLine;
     const bool wantPopup = options.createPopup && !options.inReplyToObject.has_value() &&
                            !isMeasurementFamily;
-    const int popupNumber = wantPopup ? appender.allocateObject() : 0;
+    // 就地改寫時沿用原本那顆 /Popup，不新建：新建一顆而舊的仍掛在 /Annots 上，
+    // 使用者會看到同一則註解有兩個彈出視窗。
+    const int popupNumber = replacing ? options.reusePopupObject.value_or(0)
+                           : wantPopup ? appender.allocateObject()
+                                       : 0;
 
     // 自訂圖片圖章的影像必須是獨立物件：/Resources /XObject 的值只能是參照，
     // 影像串流沒辦法內嵌在字典裡。
@@ -492,9 +500,16 @@ AnnotationWriteResult writeAnnotation(IncrementalAppender& appender, int pageInd
     ap.set("N", makeRef(appearanceNumber));
     annot.set("AP", PdfObject{std::move(ap)});
 
-    appender.setObject(annotationNumber, PdfObject{std::move(annot)});
+    // 改寫既有物件要走 updateObject；setObject 只接受 allocateObject() 給的編號。
+    if (replacing) {
+        if (!appender.updateObject(annotationNumber, PdfObject{std::move(annot)})) {
+            return failure("要改寫的註解不存在於原檔");
+        }
+    } else {
+        appender.setObject(annotationNumber, PdfObject{std::move(annot)});
+    }
 
-    if (popupNumber != 0) {
+    if (popupNumber != 0 && !replacing) {
         const RectF bbox = appearance.bbox.normalized();
         PdfDictionary popup;
         popup.set("Type", makeName("Annot"));
@@ -508,15 +523,18 @@ AnnotationWriteResult writeAnnotation(IncrementalAppender& appender, int pageInd
         appender.setObject(popupNumber, PdfObject{std::move(popup)});
     }
 
-    const PageEditStatus annots =
-        appendToPageArray(appender, pageRef, "Annots", makeRef(annotationNumber));
-    if (!annots.ok) return failure("掛上 /Annots 失敗：" + annots.diagnostic);
+    // 就地改寫的那一則已經在 /Annots 裡了，再掛一次會讓它出現兩次。
+    if (!replacing) {
+        const PageEditStatus annots =
+            appendToPageArray(appender, pageRef, "Annots", makeRef(annotationNumber));
+        if (!annots.ok) return failure("掛上 /Annots 失敗：" + annots.diagnostic);
 
-    if (popupNumber != 0) {
-        // /Popup 也必須是頁面的註解之一，否則 Acrobat 找不到它。
-        const PageEditStatus popupStatus =
-            appendToPageArray(appender, pageRef, "Annots", makeRef(popupNumber));
-        if (!popupStatus.ok) return failure("掛上 /Popup 失敗：" + popupStatus.diagnostic);
+        if (popupNumber != 0) {
+            // /Popup 也必須是頁面的註解之一，否則 Acrobat 找不到它。
+            const PageEditStatus popupStatus =
+                appendToPageArray(appender, pageRef, "Annots", makeRef(popupNumber));
+            if (!popupStatus.ok) return failure("掛上 /Popup 失敗：" + popupStatus.diagnostic);
+        }
     }
 
     AnnotationWriteResult result{};

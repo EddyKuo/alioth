@@ -38,6 +38,8 @@ add_library(alioth_ui STATIC
     stamp_dialog.h
     sticky_note_popup.cpp
     sticky_note_popup.h
+    thumbnail_delegate.cpp
+    thumbnail_delegate.h
     layers_panel.cpp
     layers_panel.h
     ruler_widget.cpp

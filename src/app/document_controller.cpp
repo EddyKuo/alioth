@@ -57,7 +57,17 @@ DocumentController::~DocumentController() {
 }
 
 void DocumentController::openDocument(const QString& path, const QString& password) {
+    openInternal(path, password, false);
+}
+
+void DocumentController::reloadDocument() {
+    if (path_.isEmpty()) return;
+    openInternal(path_, password_, true);
+}
+
+void DocumentController::openInternal(const QString& path, const QString& password, bool reload) {
     path_ = path;
+    password_ = password;
     viewportGeneration_.cancelAll();
     viewportGeneration_.reset();
     // 換文件：上一份還在佇列裡的縮圖不可以畫進新文件的面板上——
@@ -70,14 +80,18 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
     pageSizes_.clear();
     geometryState_.clear();
     geometryAttempts_.clear();
+    // 註解要整份重掃：檔案已經變了，舊的頁內序號可能對不上。
+    annotations_.clear();
+    annotationPagesLoaded_.clear();
     open_ = false;
 
     engine_->openDocument(
-        path.toStdString(), password.toStdString(), [this, path](engine::OpenResult result) {
+        path.toStdString(), password.toStdString(),
+        [this, path, reload](engine::OpenResult result) {
             // 這裡是引擎執行緒。任何 UI 相關動作都必須排回 GUI 執行緒。
             QMetaObject::invokeMethod(
                 this,
-                [this, path, result] {
+                [this, path, result, reload] {
                     if (!result.ok()) {
                         emit documentOpenFailed(static_cast<int>(result.error),
                                                 QString::fromUtf8(domain::describe(result.error)));
@@ -90,8 +104,14 @@ void DocumentController::openDocument(const QString& path, const QString& passwo
                                           PageGeometryState::NotRequested);
                     geometryAttempts_.assign(static_cast<std::size_t>(info_.pageCount),
                                              std::uint8_t{0});
+                    annotationPagesLoaded_.assign(static_cast<std::size_t>(info_.pageCount),
+                                                  false);
                     loadPageGeometry();
-                    emit documentOpened(path);
+                    if (reload) {
+                        emit documentReloaded(path);
+                    } else {
+                        emit documentOpened(path);
+                    }
                     requestOutline();
                 },
                 Qt::QueuedConnection);
@@ -110,6 +130,7 @@ void DocumentController::closeDocument() {
     geometryAttempts_.clear();
     outline_.clear();
     annotations_.clear();
+    annotationPagesLoaded_.clear();
     links_.clear();
     open_ = false;
     info_ = {};
@@ -343,7 +364,6 @@ void DocumentController::requestOutline() {
 
 void DocumentController::requestAnnotations(std::int32_t fromPage, std::int32_t toPage) {
     if (!open_) return;
-    annotations_.clear();
 
     const std::int32_t first = std::max(0, fromPage);
     const std::int32_t last = std::min(info_.pageCount - 1, toPage);
@@ -352,10 +372,30 @@ void DocumentController::requestAnnotations(std::int32_t fromPage, std::int32_t 
         return;
     }
 
+    // 只掃還沒掃過的頁。
+    //
+    // 先前這裡是 annotations_.clear() 加上整段重掃，而呼叫端只在開檔時要過
+    // 一次前 33 頁——於是註解清單、上一則／下一則、頁面上的註解命中測試
+    // 全部只認得前 33 頁。一份 100 頁的文件，第 80 頁的便利貼點不開，
+    // 而畫面上沒有任何跡象說明為什麼。
+    std::vector<std::int32_t> wanted;
+    for (std::int32_t page = first; page <= last; ++page) {
+        const auto index = static_cast<std::size_t>(page);
+        if (index < annotationPagesLoaded_.size() && annotationPagesLoaded_[index]) continue;
+        if (index < annotationPagesLoaded_.size()) annotationPagesLoaded_[index] = true;
+        wanted.push_back(page);
+    }
+    // 全部都掃過了就什麼都不做，**尤其不要發 annotationsReady**。
+    // 捲動時每過一個頁面邊界都會呼叫這裡，發了訊號等於每次都重建整份註解
+    // 清單；而重建會把 QListWidget 的目前列清掉，使用者剛選起來的那一則
+    // 就在捲動中自己消失了。
+    if (wanted.empty()) return;
+
     // 每頁各自回報，最後一頁回來時才發訊號。若每頁都發，1,000 筆註解會讓
     // 列表重繪 N 次，而 PRD-ANN-008 的預算是整份載入 500 毫秒。
-    auto remaining = std::make_shared<std::atomic<std::int32_t>>(last - first + 1);
-    for (std::int32_t page = first; page <= last; ++page) {
+    auto remaining = std::make_shared<std::atomic<std::int32_t>>(
+        static_cast<std::int32_t>(wanted.size()));
+    for (const std::int32_t page : wanted) {
         engine_->pageAnnotations(
             page, [this, remaining](std::vector<domain::AnnotationSummary> summaries) {
                 QMetaObject::invokeMethod(
@@ -365,6 +405,9 @@ void DocumentController::requestAnnotations(std::int32_t fromPage, std::int32_t 
                                             std::make_move_iterator(summaries.begin()),
                                             std::make_move_iterator(summaries.end()));
                         if (remaining->fetch_sub(1) == 1) {
+                            // 排序是必要的而不是美觀：註解的「文件順序」是
+                            // 上一則／下一則的依據，而頁面是非同步回來的，
+                            // 抵達順序與頁碼無關。
                             std::sort(annotations_.begin(), annotations_.end(),
                                       [](const domain::AnnotationSummary& a,
                                          const domain::AnnotationSummary& b) {

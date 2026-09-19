@@ -15,11 +15,13 @@
 #include <QScrollBar>
 #include <QSet>
 #include <QSignalSpy>
+#include <QTreeWidget>
 
 #include "app/document_controller.h"
 #include "pdf_fixture.h"
 #include "ui/main_window.h"
 #include "ui/page_view.h"
+#include "ui/thumbnail_delegate.h"
 
 using namespace alioth;
 
@@ -320,6 +322,233 @@ private slots:
         }
         QCOMPARE(withIcon, kPages);
         (void)withIcon;
+    }
+
+    // 點縮圖要跳到那一頁。
+    //
+    // 縮圖面板的存在意義就是拿來翻頁的。回報的症狀是「點了沒反應」：
+    // 清單上的選取跟著滑鼠走，但檢視區停在原地。
+    void clickingAThumbnailJumpsToThatPage() {
+        ui::MainWindow window;
+        window.resize(1280, 860);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        auto* controller = window.findChild<app::DocumentController*>();
+        QSignalSpy opened(controller, &app::DocumentController::documentOpened);
+        window.openPath(file_->fileName());
+        QVERIFY(opened.wait(10000));
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"));
+        QVERIFY(list != nullptr);
+        auto* view = window.findChild<ui::PageView*>(QStringLiteral("pageView"));
+        QVERIFY(view != nullptr);
+        QCoreApplication::processEvents();
+
+        const int target = 5;
+        QVERIFY(list->count() > target);
+        list->scrollToItem(list->item(target));
+        QCoreApplication::processEvents();
+
+        const QRect rect = list->visualItemRect(list->item(target));
+        QVERIFY(!rect.isEmpty());
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, rect.center());
+        QCoreApplication::processEvents();
+
+        QCOMPARE(list->currentRow(), target);
+        QCOMPARE(static_cast<int>(view->pageIndex()), target);
+    }
+
+    // 真實動線：點過縮圖之後自己捲開，再點回原本那一格。
+    //
+    // 這是使用者回報「點縮圖沒反應」的實際情形。清單的選取不會跟著檢視區走，
+    // 所以捲開之後選取仍停在上次點的那一格；再點它一次不會發出
+    // currentRowChanged，於是完全沒有反應——而使用者做的事完全合理：
+    // 「我剛剛在第 6 頁，捲遠了，點回去」。
+    void clickingTheAlreadySelectedThumbnailStillJumps() {
+        ui::MainWindow window;
+        window.resize(1280, 860);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        auto* controller = window.findChild<app::DocumentController*>();
+        QSignalSpy opened(controller, &app::DocumentController::documentOpened);
+        window.openPath(file_->fileName());
+        QVERIFY(opened.wait(10000));
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"));
+        auto* view = window.findChild<ui::PageView*>(QStringLiteral("pageView"));
+        QVERIFY(list != nullptr && view != nullptr);
+        QCoreApplication::processEvents();
+
+        const int target = 5;
+        list->scrollToItem(list->item(target));
+        QCoreApplication::processEvents();
+        const QRect rect = list->visualItemRect(list->item(target));
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, rect.center());
+        QCoreApplication::processEvents();
+        QCOMPARE(static_cast<int>(view->pageIndex()), target);
+
+        // 使用者自己捲開——捲動會換頁，但不會動到清單的選取。
+        view->scrollToPage(kPages - 1);
+        QCoreApplication::processEvents();
+        QVERIFY(static_cast<int>(view->pageIndex()) != target);
+
+        // 再點同一格：使用者的意圖是「回到第 6 頁」。
+        list->scrollToItem(list->item(target));
+        QCoreApplication::processEvents();
+        const QRect again = list->visualItemRect(list->item(target));
+        QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, again.center());
+        QCoreApplication::processEvents();
+        QCOMPARE(static_cast<int>(view->pageIndex()), target);
+    }
+
+    // 捲動換頁時，縮圖的選取要跟著走——否則使用者看不出自己在哪一頁。
+    void scrollingTheViewMovesTheThumbnailSelection() {
+        ui::MainWindow window;
+        window.resize(1280, 860);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        auto* controller = window.findChild<app::DocumentController*>();
+        QSignalSpy opened(controller, &app::DocumentController::documentOpened);
+        window.openPath(file_->fileName());
+        QVERIFY(opened.wait(10000));
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"));
+        auto* view = window.findChild<ui::PageView*>(QStringLiteral("pageView"));
+        QVERIFY(list != nullptr && view != nullptr);
+
+        view->scrollToPage(kPages - 1);
+        QCoreApplication::processEvents();
+        QCOMPARE(list->currentRow(), static_cast<int>(view->pageIndex()));
+    }
+
+    // 可點的範圍要跟看得到的格子一樣大。
+    //
+    // 預設委派的項目大小取決於「圖示到了沒有」：縮圖還沒到的格子只有一行
+    // 頁碼那麼大，於是使用者看到一個大格子、卻只有中間一小塊點得到。
+    // 點在紙張邊緣（那正是最順手的地方）完全沒反應。
+    void theWholeCellIsClickableNotJustThePaper() {
+        ui::MainWindow window;
+        window.resize(1280, 860);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        auto* controller = window.findChild<app::DocumentController*>();
+        QSignalSpy opened(controller, &app::DocumentController::documentOpened);
+        window.openPath(file_->fileName());
+        QVERIFY(opened.wait(10000));
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"));
+        auto* view = window.findChild<ui::PageView*>(QStringLiteral("pageView"));
+        QVERIFY(list != nullptr && view != nullptr);
+        QCoreApplication::processEvents();
+
+        const int target = 4;
+        list->scrollToItem(list->item(target));
+        QCoreApplication::processEvents();
+        const QRect cell = list->visualItemRect(list->item(target));
+        QVERIFY(!cell.isEmpty());
+
+        // 格子要有整個格線那麼大，不是縮成圖示或文字。
+        QCOMPARE(cell.size(), ui::thumbnailCellSize());
+
+        // 點四個角落附近——那些位置都在格子裡，都該跳到這一頁。
+        // 每一輪重新取一次格子的位置：選取會跟著檢視區走，而那會把清單捲動，
+        // 沿用上一輪的座標測到的是別的格子。
+        for (int corner = 0; corner < 4; ++corner) {
+            view->scrollToPage(0);
+            QCoreApplication::processEvents();
+            list->scrollToItem(list->item(target));
+            QCoreApplication::processEvents();
+
+            const QRect current = list->visualItemRect(list->item(target));
+            const QPoint point = corner == 0   ? current.topLeft() + QPoint(3, 3)
+                                 : corner == 1 ? current.topRight() + QPoint(-3, 3)
+                                 : corner == 2 ? current.bottomLeft() + QPoint(3, -3)
+                                               : current.bottomRight() + QPoint(-3, -3);
+            QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, point);
+            QCoreApplication::processEvents();
+            QVERIFY2(static_cast<int>(view->pageIndex()) == target,
+                     qPrintable(QStringLiteral("點 (%1,%2) 沒跳頁——可點範圍比格子小")
+                                    .arg(point.x())
+                                    .arg(point.y())));
+        }
+    }
+
+    // 格子大小不可以因為縮圖還沒到而不同。
+    //
+    // 選取框畫的就是格子。大小跟著載入狀態走的話，使用者會看到「停留過的
+    // 那一頁比較大」，而其他頁的選取框只有一小條。
+    void cellsAreTheSameSizeWhetherOrNotTheThumbnailArrived() {
+        auto longer = test::writeTempPdf(makePdfWithPages(60));
+        QVERIFY(longer != nullptr);
+
+        ui::MainWindow window;
+        window.resize(1280, 860);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        auto* controller = window.findChild<app::DocumentController*>();
+        QSignalSpy opened(controller, &app::DocumentController::documentOpened);
+        window.openPath(longer->fileName());
+        QVERIFY(opened.wait(10000));
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"));
+        QVERIFY(list != nullptr);
+        for (int i = 0; i < 20; ++i) QCoreApplication::processEvents(QEventLoop::AllEvents, 20);
+
+        // 開檔不會把六十張都要下來，所以後面必然有還沒到的格子——
+        // 這一條測的正是那些格子。
+        int loaded = 0;
+        int blank = 0;
+        for (int i = 0; i < list->count(); ++i) {
+            const QSize size = list->visualItemRect(list->item(i)).size();
+            QCOMPARE(size, ui::thumbnailCellSize());
+            if (list->item(i)->icon().isNull()) {
+                ++blank;
+            } else {
+                ++loaded;
+            }
+        }
+        QVERIFY2(loaded > 0 && blank > 0, "沒有同時出現「已載入」與「未載入」的格子，這條測不到差異");
+    }
+
+    // 關檔之後縮圖要跟著消失。
+    //
+    // 留在面板上的縮圖指向一份已經關掉的文件：點下去會跳頁，而檢視區
+    // 什麼都沒有。書籤與註解清單同理——關檔後畫面上不該還有文件的內容。
+    void closingTheDocumentClearsThePanels() {
+        ui::MainWindow window;
+        window.resize(1280, 860);
+        window.show();
+        QVERIFY(QTest::qWaitForWindowExposed(&window));
+
+        auto* controller = window.findChild<app::DocumentController*>();
+        QSignalSpy opened(controller, &app::DocumentController::documentOpened);
+        window.openPath(file_->fileName());
+        QVERIFY(opened.wait(10000));
+
+        auto* list = window.findChild<QListWidget*>(QStringLiteral("thumbnailList"));
+        QVERIFY(list != nullptr);
+        QCOMPARE(list->count(), kPages);
+
+        QSignalSpy closed(controller, &app::DocumentController::documentClosed);
+        controller->closeDocument();
+        QVERIFY(closed.wait(10000));
+        QCoreApplication::processEvents();
+
+        QCOMPARE(list->count(), 0);
+
+        auto* outline = window.findChild<QTreeWidget*>(QStringLiteral("outlineTree"));
+        if (outline != nullptr) QCOMPARE(outline->topLevelItemCount(), 0);
+
+        // 關完再開一份，清單要正確重建——清空不能把面板弄成不能再用。
+        opened.clear();
+        window.openPath(file_->fileName());
+        QVERIFY(opened.wait(10000));
+        QCOMPARE(list->count(), kPages);
     }
 
 private:

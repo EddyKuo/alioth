@@ -88,6 +88,21 @@ public:
                                                           std::int32_t indexOnPage,
                                                           const QString& contents);
 
+    // 改寫一則既有註解的屬性（PRD-ANN-009 的屬性面板）。
+    //
+    // 定位方式與 deleteAnnotation 相同：(pageIndex, indexOnPage) 就是使用者
+    // 在註解列表上看到的那一則。
+    //
+    // 沿用原本的物件編號並重新產生 /AP：換編號會讓既有回覆的 /IRT 指向孤兒，
+    // 不換 /AP 則會讓字典裡的顏色與畫面上的顏色不一致（Acrobat 以 /AP 為準，
+    // 其他檢視器以字典為準，於是同一份文件在兩邊長得不一樣）。
+    //
+    // 回覆註解（有 /IRT）會被拒絕：它的狀態與串接關係都掛在自己的字典上，
+    // 而這條路徑重建字典時帶不回那些鍵。要改回覆的內容請用註釋視窗。
+    [[nodiscard]] HighlightResult updateAnnotation(const QString& path, std::int32_t pageIndex,
+                                                   std::int32_t indexOnPage,
+                                                   const domain::Annotation& annotation);
+
     // 回覆一則註解，或替它標上審閱狀態（PRD-ANN-007）。
     //
     // 兩者共用同一條路徑，因為在 PDF 裡它們是同一件事：狀態由一則**獨立的

@@ -1,5 +1,7 @@
 #include "ui/page_view.h"
 
+#include "domain/zoom_aids.h"
+
 #include <QAccessible>
 #include <QAccessibleEvent>
 #include <QAccessibleWidget>
@@ -181,6 +183,35 @@ PageView::PageView(app::DocumentController* controller, app::SelectionController
         // 總頁數在開檔後才知道，狀態字串必須重算：開檔前是「未開啟文件」。
         announceState();
     });
+    connect(controller_, &app::DocumentController::documentReloaded, this, [this](const QString&) {
+        // 重載**不可以**動檢視位置。
+        //
+        // 每一次寫入都會重載（增量儲存架構下這是唯一看得到結果的方式），
+        // 而使用者還站在他剛才加註解的那一頁。這裡只重算版面與捲軸範圍：
+        // 頁碼、倍率、捲動位置全部原封不動，只有在頁數變少而目前頁超出範圍時
+        // 才夾回最後一頁。
+        syncLayoutSizes();
+        const std::int32_t pages = controller_->pageCount();
+        if (pages > 0 && pageIndex_ >= pages) {
+            pageIndex_ = pages - 1;
+            emit pageChanged(pageIndex_);
+        }
+        publishViewport();
+        announceState();
+        viewport()->update();
+    });
+    connect(controller_, &app::DocumentController::documentClosed, this, [this] {
+        // 關檔後版面要跟著空掉。少了這一步，捲軸範圍與頁面矩形都還是上一份
+        // 文件的：畫面留著最後那一頁的圖磚，捲動還能捲，而文件其實已經關了。
+        pageIndex_ = 0;
+        syncLayoutSizes();
+        updateScrollRanges();
+        horizontalScrollBar()->setValue(0);
+        verticalScrollBar()->setValue(0);
+        publishViewport();
+        announceState();
+        viewport()->update();
+    });
 }
 
 domain::RectI PageView::visibleRectInCurrentPage() const {
@@ -348,6 +379,45 @@ void PageView::scrollToPage(std::int32_t index) {
     publishViewport();
 }
 
+void PageView::zoomToPageRect(std::int32_t pageIndex, const domain::RectF& pageRect) {
+    const domain::RectI placement = layout_.pageRect(pageIndex);
+    if (placement.isEmpty()) return;
+
+    // 頁面座標（Y 向上）→ 頁內裝置座標（邏輯像素、目前倍率）。
+    // 這裡刻意用 scale_ 而不是 renderScale()：框選與捲軸都在邏輯像素空間，
+    // 混進裝置像素比會讓高 DPI 螢幕上縮放到錯誤的倍率。
+    const domain::PageTransform transform(controller_->pageSizePt(pageIndex), scale_, rotation_);
+    const domain::RectF box = pageRect.normalized();
+    const domain::PointF a = transform.toDevice(domain::PointF{box.left, box.top});
+    const domain::PointF b = transform.toDevice(domain::PointF{box.right, box.bottom});
+
+    domain::RectZoomRequest request;
+    request.selection = domain::RectI{
+        static_cast<std::int32_t>(std::lround(placement.x + std::min(a.x, b.x))),
+        static_cast<std::int32_t>(std::lround(placement.y + std::min(a.y, b.y))),
+        static_cast<std::int32_t>(std::lround(std::abs(b.x - a.x))),
+        static_cast<std::int32_t>(std::lround(std::abs(b.y - a.y)))};
+    request.currentScale = scale_;
+    request.viewportPx = domain::SizeF{static_cast<double>(viewport()->width()),
+                                       static_cast<double>(viewport()->height())};
+    request.minScale = kMinScale;
+    request.maxScale = kMaxScale;
+
+    const domain::RectZoomResult result = domain::computeRectZoom(request);
+    // 框選退化（單點點擊）時 computeRectZoom 回傳目前倍率，不要白做一次縮放。
+    if (std::abs(result.newScale - scale_) < 1e-9) return;
+
+    setScale(result.newScale);
+    // setScale 以可視區中心為錨，這裡再把框選中心推到中心——兩步是刻意的，
+    // 中間那一步讓倍率與版面先安定下來，捲軸範圍才是新倍率下的範圍。
+    horizontalScrollBar()->setValue(static_cast<int>(
+        std::lround(result.centerAtNewScale.x - viewport()->width() / 2.0)));
+    verticalScrollBar()->setValue(static_cast<int>(
+        std::lround(result.centerAtNewScale.y - viewport()->height() / 2.0)));
+    publishViewport();
+    viewport()->update();
+}
+
 void PageView::setScale(double scale) {
     applyZoomAnchored(scale, QPointF(viewport()->rect().center()));
 }
@@ -513,6 +583,27 @@ void PageView::finishVertexDrawing(bool commit) {
     const std::size_t minimum = tool_ == Tool::PolyLine ? 2u : 3u;
     if (vertices.size() < minimum) return;
     emit verticesDrawn(page, vertices, tool_ != Tool::PolyLine);
+}
+
+bool PageView::cancelPendingGesture() {
+    if (pendingVertexPage_ >= 0) {
+        finishVertexDrawing(false);
+        return true;
+    }
+    if (pendingStrokePage_ >= 0) {
+        pendingStroke_.clear();
+        pendingStrokePage_ = -1;
+        dragging_ = false;
+        viewport()->update();
+        return true;
+    }
+    if (shapePage_ >= 0) {
+        shapePage_ = -1;
+        dragging_ = false;
+        viewport()->update();
+        return true;
+    }
+    return false;
 }
 
 void PageView::setFormFieldHighlight(bool enabled) {
@@ -893,7 +984,8 @@ void PageView::mouseReleaseEvent(QMouseEvent* event) {
         const bool bigEnough =
             rect.width() >= kMinimumExtentPt && rect.height() >= kMinimumExtentPt;
         if (tool_ == Tool::AreaSelect || tool_ == Tool::Snapshot ||
-            tool_ == Tool::RedactMark || tool_ == Tool::FormField) {
+            tool_ == Tool::RedactMark || tool_ == Tool::FormField ||
+            tool_ == Tool::ZoomArea) {
             if (bigEnough) emit areaSelected(page, rect);
         } else if (tool_ == Tool::StickyNote || bigEnough) {
             emit shapeDrawn(page, rect);

@@ -44,6 +44,20 @@ struct AnnotationWriteOptions {
     // 需要的「已接受／已拒絕／已完成」屬於 Review 模型。
     std::optional<std::string> stateModel{};
     std::optional<std::string> state{};
+
+    // 就地改寫一則既有的註解（PRD-ANN-009 的屬性面板）。
+    //
+    // 帶值時不配置新的註解物件編號，也不把它掛上 /Annots——兩者都已經在了。
+    // 沿用原本的物件編號是必要的而不是最佳化：回覆串的 /IRT 是指向**物件**
+    // 的參照，換一個編號會讓既有的回覆全部變成指向孤兒的參照，而 Acrobat
+    // 會把它們顯示成一堆獨立註解而不是一條串。
+    //
+    // 外觀串流仍然重新產生並配新物件：屬性改了（顏色、線寬、不透明度）
+    // 外觀就不同，沿用舊的 /AP 會讓檔案裡的值與畫面不一致——Acrobat 以
+    // /AP 為準，其他檢視器以字典為準，於是同一份文件在兩邊長得不一樣。
+    std::optional<int> replaceObject{};
+    // 就地改寫時原本那則的 /Popup 物件編號（0 或未設代表沒有）。
+    std::optional<int> reusePopupObject{};
 };
 
 struct AnnotationWriteResult {

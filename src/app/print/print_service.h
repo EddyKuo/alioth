@@ -22,6 +22,8 @@
 #include <memory>
 #include <vector>
 
+#include <functional>
+
 #include "app/print/print_plan.h"
 
 namespace alioth::engine {
@@ -34,6 +36,9 @@ struct PrintResult {
     bool ok{false};
     QString message;
     int sheetsPrinted{0};
+    // 使用者在列印進行中按了取消。與失敗分開回報：取消不是錯誤，
+    // 但也不能說成「已送出 N 張」就算了——那 N 張已經在紙匣裡了。
+    bool cancelled{false};
     // 實際印出的 Bates 序列，依紙張順序。回傳而不是只記在日誌裡，
     // 是為了讓上層能把它寫進送達證明——法務流程需要「這批印了哪些號碼」。
     std::vector<QString> batesNumbers;
@@ -61,9 +66,20 @@ public:
     // 只算計畫不送紙。列印對話框的「共 N 張」預覽與自動化測試都用它。
     [[nodiscard]] PrintPlan planFor(const QPrinter& printer, const PrintOptions& options);
 
+    // 每印完一張紙回報一次：(已完成張數, 總張數)。回傳 false 代表使用者
+    // 要求取消，列印會在當前這張之後停止並回報已送出的張數。
+    //
+    // 回呼在**呼叫端的執行緒**上執行，而那必然是 GUI 執行緒：QPainter 畫在
+    // QPrinter 上在 Windows 只能在 GUI 執行緒做。因此這不是「非同步列印」，
+    // 而是「可中斷的同步列印」——呼叫端在回呼裡推事件迴圈，介面就不會整段
+    // 凍住，使用者也能按取消。單張紙的渲染時間仍然可能超過 16 毫秒
+    // （A0 工程圖尤其），那要靠降低渲染解析度解決，不是靠這個回呼。
+    using SheetCallback = std::function<bool(int printed, int total)>;
+
     // 執行列印。printer 已由呼叫端設定好紙張、方向與輸出目標
     // （輸出成 PDF 時設 QPrinter::PdfFormat 與 outputFileName）。
-    PrintResult print(QPrinter& printer, const PrintOptions& options);
+    PrintResult print(QPrinter& printer, const PrintOptions& options,
+                      const SheetCallback& onSheet = {});
 
     // 印表機可列印區，單位為點，原點固定為 (0, 0)。
     //

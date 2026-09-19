@@ -156,6 +156,10 @@ mkdir -p third_party/pdfium && tar -xzf pdfium.tgz -C third_party/pdfium
 - **版面問題只能用看的**。`alioth_uishot <輸出.png>` 會以 offscreen 建構主視窗、截圖，
   並印出所有停靠面板與工具列的可見狀態與幾何。純讀程式碼判斷不出「Ribbon 被舊工具列
   擠到視窗中段」「面板收起來了但別的東西佔住那塊」——那些在程式碼上都完全正常。
+  **手動跑它要自己設 `QT_PLUGIN_PATH`**（`C:/Qt/6.8.1/msvc2022_64/plugins`）：uishot 不是
+  ctest 目標，沒有 `alioth_add_test` 幫忙注入環境，而 windeployqt 只複製了 `qwindows.dll`，
+  offscreen 外掛不在執行檔旁邊。少了它會跳「找不到 Qt platform plugin」的對話框，
+  看起來像產品壞了，其實只是這一次呼叫的環境不對。
 - **跑 uishot 或任何會建構 MainWindow 的東西之前，先清掉 QSettings**
   （Windows 在登錄檔 `HKCU\Software\Alioth`，不是檔案）。主視窗會還原上次存下的版面，
   忘了清就會拿上一次執行的殘留來判斷「預設版面」，而且它看起來完全像是修改沒生效。

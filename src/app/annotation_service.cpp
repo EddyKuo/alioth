@@ -179,6 +179,103 @@ HighlightResult AnnotationService::deleteAnnotation(const QString& path,
     return result;
 }
 
+HighlightResult AnnotationService::updateAnnotation(const QString& path,
+                                                    std::int32_t pageIndex,
+                                                    std::int32_t indexOnPage,
+                                                    const domain::Annotation& annotation) {
+    HighlightResult result;
+
+    QFile source(path);
+    if (!source.open(QIODevice::ReadOnly)) {
+        result.message = tr("無法讀取檔案：%1").arg(source.errorString());
+        return result;
+    }
+    const QByteArray bytes = source.readAll();
+    source.close();
+
+    result.previousSize = static_cast<quint64>(bytes.size());
+    result.boundaryGuard = boundaryHashOf(bytes);
+
+    engine::objects::IncrementalAppender appender;
+    std::string diagnostic;
+    const engine::objects::SourceStatus status =
+        appender.open(std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())),
+                      &diagnostic);
+    if (status != engine::objects::SourceStatus::Ok) {
+        result.message = status == engine::objects::SourceStatus::Encrypted
+                             ? tr("加密文件尚不支援修改註解屬性")
+                             : tr("無法解析文件：%1").arg(QString::fromStdString(diagnostic));
+        return result;
+    }
+
+    engine::objects::PdfRef pageRef{};
+    if (!engine::objects::pageRefAt(appender, pageIndex, pageRef)) {
+        result.message = tr("找不到第 %1 頁").arg(pageIndex + 1);
+        return result;
+    }
+
+    const std::vector<int> annots =
+        engine::objects::pageAnnotationRefs(appender.source(), pageRef);
+    if (indexOnPage < 0 || indexOnPage >= static_cast<std::int32_t>(annots.size())) {
+        result.message = tr("這一頁沒有第 %1 則註解").arg(indexOnPage + 1);
+        return result;
+    }
+    const int annotationNumber = annots[static_cast<std::size_t>(indexOnPage)];
+
+    int popupNumber = 0;
+    const engine::objects::PdfObject existing = appender.currentObject(annotationNumber);
+    const engine::objects::PdfDictionary* dict = existing.asDictionary();
+    if (dict == nullptr) {
+        result.message = tr("這一則註解的結構無法解析");
+        return result;
+    }
+    if (const engine::objects::PdfObject* popup = dict->find("Popup");
+        popup != nullptr && popup->isRef()) {
+        popupNumber = popup->asRef().number;
+    }
+    if (const engine::objects::PdfObject* irt = dict->find("IRT"); irt != nullptr) {
+        // 回覆註解的 /IRT /RT /StateModel /State 都掛在自己的字典上，而這條
+        // 路徑是重建字典——帶不回那些鍵就等於把一條審閱串默默拆掉。
+        result.message = tr("這是一則回覆，屬性請在它回覆的那一則上修改");
+        return result;
+    }
+
+    engine::objects::AnnotationWriteOptions options;
+    options.replaceObject = annotationNumber;
+    options.reusePopupObject = popupNumber;
+    const auto write = engine::objects::writeAnnotation(appender, pageIndex, annotation, options);
+    if (!write.ok) {
+        result.message = tr("寫入註解失敗：%1").arg(QString::fromStdString(write.diagnostic));
+        return result;
+    }
+
+    const engine::objects::BuildResult built = appender.build();
+    if (!built.ok) {
+        result.message = tr("增量儲存失敗：%1").arg(QString::fromStdString(built.diagnostic));
+        return result;
+    }
+
+    // 與其他寫入路徑同一道防線：增量的前提是原檔位元組原封不動，
+    // 一旦不成立，既有簽章會從「有效、簽章後有變更」變成「無效」。
+    if (built.bytes.size() < static_cast<std::size_t>(bytes.size()) ||
+        std::memcmp(built.bytes.data(), bytes.constData(),
+                    static_cast<std::size_t>(bytes.size())) != 0) {
+        result.message = tr("儲存結果不是增量：原檔位元組已被改寫，已中止以保全簽章");
+        return result;
+    }
+
+    platform::AtomicFileWriter writer(path);
+    if (!writer.begin() || !writer.write(built.bytes.data(), built.bytes.size()) ||
+        !writer.commit()) {
+        result.message = tr("寫檔失敗");
+        return result;
+    }
+
+    result.ok = true;
+    result.message = tr("已更新註解屬性（增量 %1 位元組）").arg(built.appendedBytes);
+    return result;
+}
+
 HighlightResult AnnotationService::replyToAnnotation(const QString& path, std::int32_t pageIndex,
                                                      std::int32_t indexOnPage,
                                                      const QString& contents,

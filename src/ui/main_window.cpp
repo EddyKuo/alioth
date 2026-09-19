@@ -81,16 +81,19 @@
 #include <cstring>
 #include "app/uisystem/tab_title_model.h"
 #include "engine/objects/space_audit.h"
+#include "engine/save/security_saver.h"
 #include "engine/create/image_to_pdf.h"
 #include "engine/create/markdown_to_pdf.h"
 #include "engine/create/text_to_pdf.h"
 #include "engine/pages/page_editor.h"
 #include "domain/annotation_filter.h"
+#include <QCheckBox>
 #include <QComboBox>
 #include "ui/page_view.h"
 #include <QPrintDialog>
 #include <QPrintPreviewDialog>
 #include <QPrinter>
+#include <QProgressDialog>
 
 #include "app/print/print_service.h"
 #include "platform/paths.h"
@@ -107,6 +110,7 @@
 #include "app/measurement_service.h"
 #include "engine/compare/document_comparer.h"
 #include "app/form_build_service.h"
+#include "engine/formbuild/field_tree.h"
 #include "app/annotation_flatten_service.h"
 #include "app/redaction_service.h"
 #include "app/comment_summary_service.h"
@@ -118,6 +122,7 @@
 #include "ui/compare_dialog.h"
 #include "ui/sign_dialog.h"
 #include "ui/sticky_note_popup.h"
+#include "ui/thumbnail_delegate.h"
 #include "ui/signature_panel.h"
 #include "ui/tags_panel.h"
 #include "ui/order_panel.h"
@@ -134,22 +139,25 @@ namespace {
 // 面板預設版面有破壞性變更時 +1，舊的 windowState 會被 Qt 拒絕還原。
 constexpr int kWindowStateVersion = 2;
 
-// 縮圖的圖示尺寸與格線尺寸。格線要比圖示大一圈，容得下頁碼那一行與外框，
-// 否則文字會被裁掉或壓在圖上。兩個常數放在一起，是因為它們必須一起改：
-// 只改其中一個，項目不是被裁就是格子之間出現一條用不到的空白。
-const QSize kThumbnailIconSize{120, 160};
-const QSize kThumbnailGridSize{140, 196};
+// 縮圖的格子尺寸由 ThumbnailDelegate 定義，這裡只是取一份來設 gridSize。
+// 兩邊各寫一份數字必然會在某次調整後對不起來，而症狀是可點的範圍與看得到的
+// 縮圖不一樣大——使用者點在縮圖上卻沒反應。
 
 }  // namespace
 
-MainWindow::MainWindow(QWidget* parent)
+MainWindow::MainWindow(QWidget* parent) : MainWindow(WindowRole::Primary, parent) {}
+
+MainWindow::MainWindow(WindowRole role, QWidget* parent)
     : QMainWindow(parent),
+      role_(role),
       controller_(new app::DocumentController(this)),
       selection_(new app::SelectionController(this)),
       annotations_(new app::AnnotationService(this)),
       accessibilityService_(new app::AccessibilityService(this)),
       readAloud_(new app::ReadAloudController(this)),
       commands_(new app::CommandStack(this)),
+      // 沒有文件時（以及某個頁籤的堆疊被丟掉之後）指向的那一份。
+      defaultCommands_(commands_),
       settings_(new app::Settings(this)),
       pageOps_(new app::PageOperationsService(this)),
       signatures_(new app::SignatureController(this)),
@@ -327,8 +335,15 @@ MainWindow::MainWindow(QWidget* parent)
     history_.load();
     historyPanel_->reload();
 
+    // 啟動時就套一次。動作的啟用狀態在開檔前也必須是對的——先前這個函式
+    // 只在 documentOpened／documentClosed 時被呼叫，於是「還沒開過任何檔案」
+    // 這個狀態下，需要文件的動作全部是可按的。
+    applyPermissionRestrictions();
     applySettings();
-    restoreSession();
+    // 分離出來的視窗不還原工作階段：它只負責一份被拖出來的文件。
+    // 少了這個判斷，「在新視窗開啟」會先把上次關閉時的所有頁籤開進新視窗，
+    // 使用者拖出一份文件卻得到三個頁籤。
+    if (role == WindowRole::Primary) restoreSession();
 
     connect(controller_, &app::DocumentController::documentOpened, this,
             [this](const QString& path) {
@@ -363,8 +378,23 @@ MainWindow::MainWindow(QWidget* parent)
                     pendingRestoreScale_ = 0.0;
                 }
                 // 先掃前幾頁的註解就好；捲動到哪再補（PRD-ANN-008 的 500 毫秒預算）。
+                // 「再補」是 pageChanged 裡的 requestAnnotationsAround——先前
+                // 那句註解是真的，只是沒有人實作它。
                 controller_->requestAnnotations(0, std::min(info.pageCount - 1, 32));
+                // 續讀位置可能在很後面，那一頁的註解也要先有。
+                requestAnnotationsAround(pageView_->pageIndex());
             });
+
+    // 寫入之後的重載。**不要**在這裡重設檢視位置、不要寫開啟記錄、
+    // 不要重建縮圖清單——那三件事都屬於「換了一份文件」，而這裡沒有換。
+    connect(controller_, &app::DocumentController::documentReloaded, this,
+            [this](const QString&) { refreshAfterReload(); });
+
+    // 關檔要把畫面上所有從文件來的東西清掉。掛在 documentClosed 而不是
+    // 關閉那個動作上：關閉有兩條路（選單的「關閉」、關掉最後一個頁籤），
+    // 兩邊都會走到這個訊號，而在動作上各寫一份必然會漏掉其中一條。
+    connect(controller_, &app::DocumentController::documentClosed, this,
+            [this] { clearDocumentUi(); });
 
     connect(selection_, &app::SelectionController::searchHitsChanged, this, [this] {
         const auto& hits = selection_->searchHits();
@@ -436,7 +466,11 @@ MainWindow::MainWindow(QWidget* parent)
             });
 
     connect(pageView_, &PageView::scaleChanged, this, [this](double scale) {
-        zoomLabel_->setText(tr("%1%").arg(static_cast<int>(scale * 100.0)));
+        if (zoomBox_ == nullptr) return;
+        // 擋掉訊號：setCurrentText 會觸發 editingFinished／activated，
+        // 那會把我們剛顯示的四捨五入值當成使用者輸入再套用一次。
+        const QSignalBlocker blocker(zoomBox_);
+        zoomBox_->setCurrentText(QStringLiteral("%1%").arg(static_cast<int>(scale * 100.0)));
     });
 
     connect(pageView_, &PageView::linkActivated, this,
@@ -488,6 +522,8 @@ MainWindow::MainWindow(QWidget* parent)
                     createFormField(pageIndex, pageRect);
                 } else if (pageView_->tool() == Tool::Attachment) {
                     attachFileAt(pageIndex, pageRect);
+                } else if (pageView_->tool() == Tool::ZoomArea) {
+                    pageView_->zoomToPageRect(pageIndex, pageRect);
                 } else {
                     copyAreaTextAsTsv(pageIndex, pageRect);
                 }
@@ -567,11 +603,18 @@ MainWindow::MainWindow(QWidget* parent)
         updateGeometryLabel(index, nullptr);
         // Order 面板的比對是逐頁的（PRD-A11Y-002），換頁要重算。
         orderPanel_->setPageIndex(index);
+        // 欄位面板的「只顯示本頁欄位」要知道本頁是哪一頁。先前這個 setter
+        // 沒有呼叫者，勾了之後仍然顯示全部。
+        if (fieldsPanel_ != nullptr) fieldsPanel_->setCurrentPage(index);
         // 連結是逐頁向引擎要的。面板收起來時不要求——翻頁本來就在跟渲染
         // 佇列搶時間，為了一個沒人在看的面板多排一件事並不划算。
         if (linksPanel_ != nullptr && linksDock_ != nullptr && linksDock_->isVisible()) {
             linksPanel_->setPage(index);
         }
+        syncThumbnailSelection(index);
+        // 捲到哪就把那附近的註解補進來。控制器會跳過掃過的頁，所以這裡
+        // 可以無條件呼叫；沒有新頁要掃時它連訊號都不發。
+        requestAnnotationsAround(index);
     });
 
     // PRD-UI-013：觸控長按等同右鍵開選單。選單內容刻意精簡——目前只提供
@@ -692,6 +735,32 @@ void MainWindow::buildActions() {
     registerRibbonAction(QStringLiteral("file.auditSpace"), auditAction);
     connect(auditAction, &QAction::triggered, this, [this] { auditSpaceUsage(); });
 
+    // 工作階段（PDF-XChange 的 Save / Restore Session）。
+    //
+    // 兩者的實作（storeSession / restoreSession）本來就在——關閉視窗時自動存、
+    // 啟動時自動還原用的就是它們。缺的只是手動入口，而 Ribbon 的「檔案 →
+    // 工作階段」群組先前那兩顆是永遠灰色的按鈕。
+    auto* saveSessionAction = fileMenu->addAction(tr("儲存工作階段"));
+    registerRibbonAction(QStringLiteral("session.save"), saveSessionAction);
+    connect(saveSessionAction, &QAction::triggered, this, [this] {
+        storeReadingPosition();
+        storeSession();
+        statusBar()->showMessage(tr("已記下目前開啟的文件與版面"), 5000);
+    });
+
+    auto* restoreSessionAction = fileMenu->addAction(tr("復原工作階段"));
+    registerRibbonAction(QStringLiteral("session.restore"), restoreSessionAction);
+    connect(restoreSessionAction, &QAction::triggered, this, [this] {
+        // 先問。還原會把目前開著的頁籤換掉，而使用者可能只是手滑點到。
+        if (QMessageBox::question(
+                this, tr("復原工作階段"),
+                tr("將改為開啟上次儲存的那一組文件。目前開著的文件會被取代，"
+                   "但檔案本身不受影響。要繼續嗎？")) != QMessageBox::Yes) {
+            return;
+        }
+        restoreSession();
+    });
+
     auto* manageSettingsMenu = fileMenu->addMenu(tr("管理設定(&G)"));
     registerRibbonAction(QStringLiteral("app.manageSettings"),
                          manageSettingsMenu->menuAction());
@@ -717,11 +786,18 @@ void MainWindow::buildActions() {
     auto* closeAction = fileMenu->addAction(tr("關閉(&C)"));
     registerRibbonAction(QStringLiteral("file.close"), closeAction);
     connect(closeAction, &QAction::triggered, this, [this] {
+        // 走頁籤模型而不是直接關文件：直接關的話頁籤會留在那裡指著一份
+        // 已經關掉的文件，點它會「開啟」一個其實已經關閉的檔案。
+        const app::WindowState* window = tabs_.window(tabs_.primaryWindowId());
+        if (window != nullptr && !window->tabs.empty()) {
+            closeTab(window->activeIndex);
+            return;
+        }
         controller_->closeDocument();
-        updateWindowTitle({});
     });
 
     auto* editMenu = menuBar()->addMenu(tr("編輯(&E)"));
+    editMenu_ = editMenu;
     undoAction_ = editMenu->addAction(tr("復原"));
     registerRibbonAction(QStringLiteral("edit.undo"), undoAction_);
     undoAction_->setShortcut(QKeySequence::Undo);
@@ -753,11 +829,16 @@ void MainWindow::buildActions() {
     // 排除的範圍（PDFium 沒有文字重排能力）。剪下＝複製後刪除，兩步都走
     // 既有的路徑，不另寫一條。
     auto* cutAction = editMenu->addAction(tr("剪下註解(&T)"));
+    editCutAction_ = cutAction;
     cutAction->setShortcut(QKeySequence::Cut);
     registerRibbonAction(QStringLiteral("edit.cut"), cutAction);
     connect(cutAction, &QAction::triggered, this, [this] {
-        if (annotationList_->currentRow() < 0) {
-            statusBar()->showMessage(tr("請先在註解清單選一則註解"), 4000);
+        // 判斷「哪一則」要與刪除一致。先前剪下只看清單的目前列，而刪除優先
+        // 用頁面上的選取——用「選取註解」工具點到一則被篩選條件濾掉的註解時，
+        // Delete 刪得掉它，Ctrl+X 卻說「請先在註解清單選一則」。
+        if (selectedAnnotation_ >= controller_->annotations().size() &&
+            annotationList_->currentRow() < 0) {
+            statusBar()->showMessage(tr("請先選一則註解"), 4000);
             return;
         }
         copySelectedAnnotation();
@@ -786,8 +867,14 @@ void MainWindow::buildActions() {
     buildOrganizeMenu(organizeMenu);
 
     auto* commentMenu = menuBar()->addMenu(tr("註解(&C)"));
-    auto* highlightAction = commentMenu->addAction(tr("螢光筆(&H)"));
-    registerRibbonAction(QStringLiteral("annot.highlight"), highlightAction);
+    commentMenu_ = commentMenu;
+    // 「套用到目前選取」與「切換成螢光筆工具」是兩個動作，不是一個。
+    //
+    // 先前 annot.highlight 是前者，而底線／刪除線／波浪線都是後者——同一排
+    // 四顆按鈕，第一顆的行為與其餘三顆不同：沒有選取時它跳一個 modal
+    // 「請先選取文字」，另外三顆則是切換工具等你拖過去。
+    auto* highlightAction = commentMenu->addAction(tr("螢光筆（套用到選取）(&H)"));
+    registerRibbonAction(QStringLiteral("annot.highlightSelection"), highlightAction);
     highlightAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_H));
     connect(highlightAction, &QAction::triggered, this, [this] { applyHighlight(); });
 
@@ -907,6 +994,11 @@ void MainWindow::buildActions() {
                 QKeySequence(), false));
     addTool(tr("區域選取"), Tool::AreaSelect, QStringLiteral("tool.areaSelect"), QKeySequence(),
             false);
+    // 區域框選縮放（PRD-ZOOM-004）。換算邏輯（domain::computeRectZoom）與
+    // 它的測試早就完成，缺的一直只是這個入口——Ribbon 上那顆「區域縮放」
+    // 先前是一顆永遠灰色的按鈕。
+    addTool(tr("區域縮放"), Tool::ZoomArea, QStringLiteral("tool.zoomArea"), QKeySequence(),
+            false);
     toolMenu->addSeparator();
     addTool(tr("矩形"), Tool::Rectangle, QStringLiteral("annot.rectangle"), QKeySequence(), false);
     addTool(tr("橢圓"), Tool::Ellipse, QStringLiteral("annot.ellipse"), QKeySequence(), false);
@@ -922,6 +1014,8 @@ void MainWindow::buildActions() {
     registerRibbonAction(
         QStringLiteral("annot.ink"),
         addTool(tr("鉛筆"), Tool::Pencil, QStringLiteral("annot.pencil"), QKeySequence(), false));
+    addTool(tr("螢光筆"), Tool::Highlight, QStringLiteral("annot.highlight"), QKeySequence(),
+            false);
     addTool(tr("底線"), Tool::Underline, QStringLiteral("annot.underline"), QKeySequence(), false);
     addTool(tr("刪除線"), Tool::StrikeOut, QStringLiteral("annot.strikeout"), QKeySequence(),
             false);
@@ -974,8 +1068,12 @@ void MainWindow::buildActions() {
         if (dialog.exec() == QDialog::Accepted) {
             const bool localeChanged = dialog.localeChanged();
             dialog.apply();
+            // 只套用設定。**不要**在這裡呼叫 restoreSession()：那個函式做的是
+            // 「回到上次關閉時的樣子」——它會用 restoreState() 蓋掉這個 session
+            // 裡開過的面板版面、把工作階段裡的每一份文件再登記一次頁籤
+            // （openTab 不去重，於是頁籤列出現重複），並重新開啟作用中的文件。
+            // 使用者只是按了偏好設定的「確定」。
             applySettings();
-            restoreSession();
             if (localeChanged) {
                 QMessageBox::information(
                     this, tr("介面語言"),
@@ -1065,6 +1163,21 @@ void MainWindow::buildActions() {
     auto* sanitizeAction = protectMenu->addAction(tr("清除隱藏資訊(&M)..."));
     registerRibbonAction(QStringLiteral("protect.sanitize"), sanitizeAction);
     connect(sanitizeAction, &QAction::triggered, this, [this] { sanitizeDocument(); });
+
+    // 安全性（PRD-SEC-002）。三顆按鈕在 Ribbon 的「保護 → 安全性」群組裡，
+    // 先前整組都是永遠灰色的——那是這個分頁上第一個群組，使用者看到的
+    // 是「這個產品的保護功能壞了」。
+    auto* securityInfoAction = protectMenu->addAction(tr("安全性與權限(&E)..."));
+    registerRibbonAction(QStringLiteral("protect.permissions"), securityInfoAction);
+    connect(securityInfoAction, &QAction::triggered, this, [this] { showSecurityInfo(); });
+
+    auto* setPasswordAction = protectMenu->addAction(tr("密碼保護(&W)..."));
+    registerRibbonAction(QStringLiteral("protect.password"), setPasswordAction);
+    connect(setPasswordAction, &QAction::triggered, this, [this] { setDocumentPassword(); });
+
+    auto* removeSecurityAction = protectMenu->addAction(tr("移除密碼與加密..."));
+    registerRibbonAction(QStringLiteral("protect.removeSecurity"), removeSecurityAction);
+    connect(removeSecurityAction, &QAction::triggered, this, [this] { removeDocumentSecurity(); });
 
     protectMenu->addSeparator();
     auto* clearRedactAction = protectMenu->addAction(tr("移除所有塗黑標記"));
@@ -1313,11 +1426,25 @@ void MainWindow::buildActions() {
     });
     registerRibbonAction(QStringLiteral("view.presentation"), presentationAction);
 
-    // Esc 退出。用 QShortcut 而不是覆寫 keyPressEvent：焦點在面板裡的清單上時
-    // 主視窗收不到按鍵，而使用者按 Esc 的時候焦點在哪裡是不確定的。
+    // Esc 只有一個處理器，依序嘗試三件事。
+    //
+    // 用 QShortcut 而不是覆寫 keyPressEvent：焦點在面板裡的清單上時主視窗
+    // 收不到按鍵，而使用者按 Esc 的時候焦點在哪裡是不確定的。
+    //
+    // 但 QShortcut 會**吃掉**按鍵，不管處理函式有沒有做事——先前這裡只處理
+    // 簡報模式，於是檢視區 keyPressEvent 裡的「Esc 取消多邊形」永遠收不到，
+    // 而自動捲動的狀態列訊息寫著「Esc 停止」卻沒有任何人實作它。
+    // 集中成一個處理器是唯一不會再漏掉下一個 Esc 用途的作法。
     auto* escape = new QShortcut(QKeySequence(Qt::Key_Escape), this);
     escape->setContext(Qt::ApplicationShortcut);
     connect(escape, &QShortcut::activated, this, [this] {
+        // 順序即優先權：正在進行的手勢最該被取消，簡報模式最不急
+        // （它還有 F11 與再按一次可以退出）。
+        if (autoScroller_.active()) {
+            toggleAutoScroll();
+            return;
+        }
+        if (pageView_ != nullptr && pageView_->cancelPendingGesture()) return;
         if (presentation_.handleEscape()) applyViewMode();
     });
 
@@ -1593,31 +1720,54 @@ void MainWindow::buildDockPanels() {
     thumbnailList_->setAccessibleName(tr("頁面縮圖"));
     thumbnailList_->setAccessibleDescription(tr("方向鍵選頁，Enter 跳到該頁"));
     thumbnailList_->setViewMode(QListView::IconMode);
-    thumbnailList_->setIconSize(kThumbnailIconSize);
     thumbnailList_->setResizeMode(QListView::Adjust);
     thumbnailList_->setMovement(QListView::Static);
-    thumbnailList_->setSpacing(6);
+    // 間距 0：格子之間的留白由委派自己畫在格內。交給 Qt 的 spacing 會讓
+    // 「看得到的縮圖」與「點得到的範圍」差一圈，而差的正是使用者最常點的
+    // 那一圈——縮圖的邊緣。
+    thumbnailList_->setSpacing(0);
     // 固定格線尺寸，而且必須固定。
     //
     // 少了它，項目的大小取決於「圖示到了沒有」：剛建立時是一個只有頁碼的
-    // 小方塊，縮圖非同步到達之後才撐成 120×160。IconMode 的版面是在項目
-    // **加入時**算好位置並快取的，之後圖示改變並不會重算已經排好的那些——
-    // 於是每一張縮圖都畫在當初那個小方塊的位置上，整批疊成左上角一團。
+    // 小方塊，縮圖非同步到達之後才撐大。IconMode 的版面是在項目**加入時**
+    // 算好位置並快取的，之後圖示改變並不會重算已經排好的那些——於是每一張
+    // 縮圖都畫在當初那個小方塊的位置上，整批疊成左上角一團。
     //
     // 畫面上看起來就是「只有第一頁，其他頁都不見了」：實際上 40 個項目都在，
     // 只是全部重疊。這個缺陷沒有任何錯誤訊息，count() 也完全正常——
     // 只有把畫面抓下來看才發現得了。
-    thumbnailList_->setGridSize(kThumbnailGridSize);
+    thumbnailList_->setGridSize(thumbnailCellSize());
     // 每一格一樣大，讓 Qt 走最快的版面路徑，也讓上面那個假設永遠成立。
     thumbnailList_->setUniformItemSizes(true);
     thumbnailList_->setWordWrap(false);
+    // 自己畫每一格：預設委派的項目大小跟著圖示走，可點範圍與選取框會縮成
+    // 文字那一小塊。委派回傳固定尺寸，整格都是縮圖、整格都可點。
+    thumbnailList_->setItemDelegate(new ThumbnailDelegate(thumbnailList_));
     // 拖曳重排（PRD-NAV-004）。InternalMove 讓 Qt 負責拖放的視覺回饋，
     // 我們只在放開時把「從哪到哪」換成一次頁面移動操作。
     thumbnailList_->setDragDropMode(QAbstractItemView::InternalMove);
     thumbnailList_->setDefaultDropAction(Qt::MoveAction);
 
     connect(thumbnailList_, &QListWidget::currentRowChanged, this, [this](int row) {
-        if (row >= 0 && !reorderingThumbnails_) navigateToPage(row);
+        if (row < 0 || reorderingThumbnails_ || syncingThumbnailSelection_) return;
+        navigateToPage(row);
+    });
+
+    // 點擊要另外接一次，不能只靠 currentRowChanged。
+    //
+    // 選取只在「換一格」時才發訊號，而選取不會跟著檢視區走的時候，使用者
+    // 捲開之後那一格仍然是選取狀態——再點它一次完全沒有反應。使用者做的事
+    // 完全合理（「我剛剛在第 6 頁，捲遠了，點回去」），卻看起來像面板壞了。
+    // clicked 每一次放開都會來，與選取狀態無關。
+    connect(thumbnailList_, &QListWidget::clicked, this, [this](const QModelIndex& index) {
+        if (!index.isValid() || reorderingThumbnails_) return;
+        navigateToPage(index.row());
+    });
+    // 鍵盤動線：方向鍵移動選取本來就會跳頁，但 Enter 也要能用——
+    // 無障礙說明上寫著「Enter 跳到該頁」，那就得真的做得到。
+    connect(thumbnailList_, &QListWidget::activated, this, [this](const QModelIndex& index) {
+        if (!index.isValid() || reorderingThumbnails_) return;
+        navigateToPage(index.row());
     });
 
     // 捲到哪就補要哪幾張縮圖。掛在捲軸而不是 paintEvent：paintEvent 在
@@ -1638,17 +1788,15 @@ void MainWindow::buildDockPanels() {
                 const int target = destination > start ? destination - 1 : destination;
                 if (target == start) return;
 
-                // 先把清單還原成文件目前的樣子：真正的重排由重新載入後的
-                // populateThumbnails() 呈現。少了這一步，操作失敗時清單會停在
-                // 使用者拖過的位置上，而檔案根本沒變。
-                reorderingThumbnails_ = true;
-                const std::vector<int> pages{start};
-                commitPageOperation(tr("移動頁面"), [this, pages, target] {
-                    return pageOps_->movePages(currentPath_, pages, target,
-                                               app::RewriteConsent::confirmed());
+                // 真正的動作延到事件迴圈的下一輪。
+                //
+                // 兩個理由：一、這裡還在 rowsMoved 的發送過程中，在處理器裡
+                // 重建同一個模型是在腳下抽地毯；二、移動頁面是全檔重寫，而
+                // 重寫前必須先問使用者——在拖放的事件處理中開 modal 對話框
+                // 會讓滑鼠抓取狀態卡住。
+                QTimer::singleShot(0, this, [this, start, target] {
+                    commitThumbnailReorder(start, target);
                 });
-                reorderingThumbnails_ = false;
-                populateThumbnails();
             });
 
     outlineTree_ = new QTreeWidget(this);
@@ -1693,13 +1841,36 @@ void MainWindow::buildDockPanels() {
     // 螢幕閱讀器隨即失去這個欄位的用途說明。
     searchField_->setAccessibleName(tr("搜尋文件內容"));
     searchField_->setPlaceholderText(tr("搜尋文件內容"));
+
+    // 大小寫與全字比對（PRD-SRCH-001）。引擎兩個參數一直都在，只是先前
+    // 一律寫死 false——面板上沒有開關，使用者搜尋 "PDF" 會連 "pdf" 一起中，
+    // 而他沒有辦法讓它不要。
+    searchMatchCase_ = new QCheckBox(tr("區分大小寫"), searchPanel);
+    searchMatchCase_->setObjectName(QStringLiteral("searchMatchCase"));
+    searchWholeWord_ = new QCheckBox(tr("全字比對"), searchPanel);
+    searchWholeWord_->setObjectName(QStringLiteral("searchWholeWord"));
+    auto* searchOptions = new QWidget(searchPanel);
+    auto* searchOptionsLayout = new QHBoxLayout(searchOptions);
+    searchOptionsLayout->setContentsMargins(0, 0, 0, 0);
+    searchOptionsLayout->addWidget(searchMatchCase_);
+    searchOptionsLayout->addWidget(searchWholeWord_);
+    searchOptionsLayout->addStretch(1);
+
     searchResults_ = new QListWidget(searchPanel);
     searchResults_->setObjectName(QStringLiteral("searchResults"));
     searchResults_->setAccessibleName(tr("搜尋結果"));
     searchLayout->addWidget(searchField_);
+    searchLayout->addWidget(searchOptions);
     searchLayout->addWidget(searchResults_);
 
     connect(searchField_, &QLineEdit::returnPressed, this, [this] { runSearch(); });
+    // 改了選項就重跑：留著上一次的結果會讓清單與勾選狀態說兩件不同的事。
+    connect(searchMatchCase_, &QCheckBox::toggled, this, [this](bool) {
+        if (!searchField_->text().isEmpty()) runSearch();
+    });
+    connect(searchWholeWord_, &QCheckBox::toggled, this, [this](bool) {
+        if (!searchField_->text().isEmpty()) runSearch();
+    });
     connect(searchResults_, &QListWidget::currentRowChanged, this, [this](int row) {
         if (row < 0) return;
         selection_->selectSearchHit(static_cast<std::size_t>(row));
@@ -1760,6 +1931,7 @@ void MainWindow::buildDockPanels() {
         if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) {
             selectedAnnotation_ = static_cast<std::size_t>(-1);
             if (pageView_ != nullptr) pageView_->clearHighlightedRect();
+            if (propertiesPanel_ != nullptr) propertiesPanel_->setAnnotation(std::nullopt);
             return;
         }
         const auto& items = controller_->annotations();
@@ -1773,6 +1945,7 @@ void MainWindow::buildDockPanels() {
         if (pageView_ != nullptr) {
             pageView_->setHighlightedRect(items[index].pageIndex, items[index].rect);
         }
+        loadAnnotationProperties(index);
         navigateToPage(items[index].pageIndex);
     });
 
@@ -1837,6 +2010,25 @@ void MainWindow::buildDockPanels() {
             [this] { deleteSelectedAnnotation(); });
     registerRibbonAction(QStringLiteral("comment.delete"), deleteAnnotationAction);
 
+    // 這四個動作先前只存在於清單的右鍵選單與 Ribbon 裡。切到傳統選單
+    // （view.classicMenu）的使用者因此在選單列上找不到刪除註解——選單列與
+    // Ribbon 是互斥顯示的兩套入口，功能不齊等於那條路走不通。
+    //
+    // 一個 QAction 同時掛在清單與選單上是安全的：shortcutContext 是動作自己的
+    // 屬性，與它出現在哪些選單無關，所以 Delete／Ctrl+C 仍然只在清單有焦點時
+    // 觸發，不會回頭與頁面上的 Delete 互搶。
+    if (commentMenu_ != nullptr) {
+        commentMenu_->addSeparator();
+        commentMenu_->addAction(replyAction);
+        commentMenu_->addAction(statusMenu->menuAction());
+        commentMenu_->addAction(deleteAnnotationAction);
+    }
+    // 複製註解跟著剪下／貼上註解放編輯選單，插在剪下前面：三者是同一組操作，
+    // 拆到兩個選單只會讓使用者在找不到的那一個裡翻兩次。
+    if (editMenu_ != nullptr && editCutAction_ != nullptr) {
+        editMenu_->insertAction(editCutAction_, copyAnnotationAction);
+    }
+
     connect(annotationAuthorFilter_, &QComboBox::currentIndexChanged, this,
             [this](int) { populateAnnotations(); });
     connect(annotationTypeFilter_, &QComboBox::currentIndexChanged, this,
@@ -1854,11 +2046,10 @@ void MainWindow::buildDockPanels() {
     commentDock_ = addPanel(QStringLiteral("commentDock"), tr("註解"), Qt::RightDockWidgetArea, commentPanel);
     QDockWidget* comments = commentDock_;
     tabifyDockWidget(search, comments);
-    auto* propertiesList = new QListWidget(this);
-    propertiesList->setObjectName(QStringLiteral("propertiesList"));
-    propertiesList->setAccessibleName(tr("文件屬性"));
-    auto* properties = addPanel(QStringLiteral("propertiesDock"), tr("屬性"), Qt::RightDockWidgetArea, propertiesList);
-    tabifyDockWidget(comments, properties);
+    // 先前這裡有一個叫「屬性」的面板：一個從未被填入內容的 QListWidget，
+    // 沒有開關動作、預設隱藏、F6 循環又跳過隱藏面板——完全到不了。
+    // 文件屬性已經有對話框（Ctrl+D），而 propertiesDock_ 這個成員指的其實是
+    // 註解屬性面板，留著只會讓下一個改這段的人搞混。已移除。
 
     historyPanel_ = new HistoryPanel(&history_, this);
     historyDock_ = addPanel(QStringLiteral("historyDock"), tr("開啟記錄"), Qt::LeftDockWidgetArea, historyPanel_);
@@ -1871,7 +2062,14 @@ void MainWindow::buildDockPanels() {
             });
     connect(historyPanel_, &HistoryPanel::markRequested, this, [this](const QString& path,
                                                                      int pageIndex) {
-        if (path != alioth::app::normalizeDocumentPath(currentPath_)) openPath(path);
+        // 已經開著的就直接跳。先前這裡一律只設 pendingRestorePage_，而那個值
+        // 只有開檔完成時才會被消費——同一份文件上點閱讀標記完全沒有反應，
+        // 然後在下一次開任何文件時突然跳到那一頁。
+        if (path == alioth::app::normalizeDocumentPath(currentPath_) && controller_->isOpen()) {
+            navigateToPage(pageIndex);
+            return;
+        }
+        openPath(path);
         pendingRestorePage_ = pageIndex;
     });
 
@@ -1910,14 +2108,45 @@ void MainWindow::buildDockPanels() {
 
     fieldsPanel_ = new FieldsPanel(this);
     fieldsDock_ = addPanel(QStringLiteral("fieldsDock"), tr("欄位"), Qt::RightDockWidgetArea, fieldsPanel_);
-    connect(forms_, &app::FormController::fieldsReady, this,
-            [this] { fieldsPanel_->setFields(forms_->fields()); });
+    connect(forms_, &app::FormController::fieldsReady, this, [this] {
+        const auto& fields = forms_->fields();
+        fieldsPanel_->setFields(fields);
+        fieldsPanel_->setCurrentPage(pageView_->pageIndex());
+
+        // 把矩形餵給檢視區，「標示表單欄位」才畫得出東西。
+        //
+        // 先前 setFormFieldRects() 沒有任何呼叫者：開關打開只是把旗標設起來，
+        // 而要畫的清單永遠是空的——按鈕按下去畫面完全沒變，使用者只能得出
+        // 「這個功能壞了」的結論。
+        std::vector<std::pair<int, domain::RectF>> rects;
+        rects.reserve(fields.size());
+        for (const engine::formbuild::FieldSummary& field : fields) {
+            if (field.pageIndex < 0 || field.rectPt.isEmpty()) continue;
+            rects.emplace_back(field.pageIndex, field.rectPt);
+        }
+        pageView_->setFormFieldRects(std::move(rects));
+    });
     connect(fieldsPanel_, &FieldsPanel::fieldActivated, this, [this](const QString&, int page) {
         if (page >= 0) navigateToPage(page);
     });
 
     propertiesPanel_ = new AnnotationPropertiesPanel(this);
     propertiesDock_ = addPanel(QStringLiteral("annotationPropertiesDock"), tr("註解屬性"), Qt::RightDockWidgetArea, propertiesPanel_);
+    // 先前這個面板只被建立、加進停靠區，然後就沒有人再碰它——沒有人餵資料、
+    // 也沒有人接 annotationEdited。Ctrl+' 與 Ribbon 的「註解屬性」叫出來的
+    // 永遠是一句「選取一則註解以檢視並修改它的屬性」。
+    connect(propertiesPanel_, &AnnotationPropertiesPanel::annotationEdited, this,
+            [this](const domain::Annotation& edited) { applyAnnotationProperties(edited); });
+    // 面板收起來時不讀檔（讀的是整份文件）。打開的當下補一次，否則面板會停在
+    // 「沒有選取」，而使用者明明剛剛才點過一則註解。
+    connect(propertiesDock_, &QDockWidget::visibilityChanged, this, [this](bool visible) {
+        if (!visible) return;
+        if (propertiesPending_ != static_cast<std::size_t>(-1)) {
+            loadAnnotationProperties(propertiesPending_);
+        } else if (selectedAnnotation_ < controller_->annotations().size()) {
+            loadAnnotationProperties(selectedAnnotation_);
+        }
+    });
 
     attachmentsPanel_ = new AttachmentsPanel(this);
     // Tags 面板（PRD-A11Y-001）。放在左側與書籤同一疊：兩者都是文件的
@@ -2369,12 +2598,14 @@ void MainWindow::selectAnnotation(std::size_t index) {
     if (index >= items.size()) {
         selectedAnnotation_ = static_cast<std::size_t>(-1);
         pageView_->clearHighlightedRect();
+        if (propertiesPanel_ != nullptr) propertiesPanel_->setAnnotation(std::nullopt);
         return;
     }
 
     selectedAnnotation_ = index;
     const domain::AnnotationSummary& item = items[index];
     pageView_->setHighlightedRect(item.pageIndex, item.rect);
+    loadAnnotationProperties(index);
 
     // 清單上同步選起來。找不到是正常的——目前的篩選條件可能把它濾掉了；
     // 那時只留強調框，不去動使用者設好的篩選條件。
@@ -2391,6 +2622,90 @@ void MainWindow::selectAnnotation(std::size_t index) {
                                  .arg(item.author.empty() ? tr("未署名")
                                                           : QString::fromStdString(item.author)),
                              4000);
+}
+
+void MainWindow::loadAnnotationProperties(std::size_t index) {
+    if (propertiesPanel_ == nullptr) return;
+    const auto& items = controller_->annotations();
+    if (index >= items.size() || currentPath_.isEmpty()) {
+        propertiesPanel_->setAnnotation(std::nullopt);
+        return;
+    }
+    const domain::AnnotationSummary& target = items[index];
+
+    // 只在面板真的看得到時才讀檔。讀的是整份文件，而使用者多數時候
+    // 根本沒有打開這個面板——為一個沒人在看的面板付一次完整 I/O 不划算。
+    if (propertiesDock_ == nullptr || !propertiesDock_->isVisible()) {
+        propertiesPending_ = index;
+        return;
+    }
+    propertiesPending_ = static_cast<std::size_t>(-1);
+
+    QString error;
+    const std::vector<app::XfdfEntry> all =
+        annotations_->readAnnotationsForExport(currentPath_, &error);
+    if (!error.isEmpty()) {
+        propertiesPanel_->setAnnotation(std::nullopt);
+        return;
+    }
+
+    // 與複製註解用同一組定位座標（頁碼 + 正規化後的 /Rect）。摘要裡的
+    // indexOnPage 是「這一頁的第幾則」，而匯出清單只含讀得回來的型別，
+    // 兩者的序號對不起來。
+    for (const app::XfdfEntry& entry : all) {
+        if (entry.pageIndex != target.pageIndex) continue;
+        if (entry.annotation.rect.normalized() != domain::RectF{target.rect}.normalized()) {
+            continue;
+        }
+        propertiesPanel_->setAnnotation(entry.annotation);
+        return;
+    }
+    // 讀不回來的型別（例如表單 widget）就顯示空狀態，而不是留著上一則的
+    // 屬性——那會讓使用者改到別則註解上。
+    propertiesPanel_->setAnnotation(std::nullopt);
+}
+
+void MainWindow::applyAnnotationProperties(const domain::Annotation& edited) {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) return;
+    const auto& items = controller_->annotations();
+    if (selectedAnnotation_ >= items.size()) return;
+    if (!controller_->info().permissions.annotate) {
+        statusBar()->showMessage(tr("此文件的權限設定不允許加註"), 5000);
+        return;
+    }
+    if (!confirmNoExternalChange(tr("註解屬性"))) return;
+
+    const domain::AnnotationSummary target = items[selectedAnnotation_];
+    const QString path = currentPath_;
+    auto state = std::make_shared<app::HighlightResult>();
+    app::Command command;
+    command.label = tr("註解屬性");
+    command.redo = [this, path, target, edited, state] {
+        *state = annotations_->updateAnnotation(path, target.pageIndex, target.indexOnPage, edited);
+        if (state->ok) reloadCurrentDocument();
+        return state->ok;
+    };
+    command.undo = [this, path, state] {
+        QString message;
+        const bool ok =
+            annotations_->revertAppend(path, state->previousSize, state->boundaryGuard, &message);
+        if (ok) {
+            reloadCurrentDocument();
+        } else {
+            statusBar()->showMessage(tr("復原失敗：%1").arg(message), 8000);
+        }
+        return ok;
+    };
+
+    if (!commands_->push(std::move(command))) {
+        statusBar()->showMessage(
+            state->message.isEmpty() ? tr("無法更新註解屬性") : state->message, 8000);
+        return;
+    }
+    updateUndoActions();
+    controller_->setDocumentDirty();
+    fileSnapshot_ = platform::captureSnapshot(path);
+    statusBar()->showMessage(state->message, 5000);
 }
 
 void MainWindow::goToAdjacentAnnotation(int direction) {
@@ -2935,6 +3250,9 @@ void MainWindow::markRedaction(int pageIndex, const domain::RectF& pageRect) {
     updateUndoActions();
     controller_->setDocumentDirty();
     fileSnapshot_ = platform::captureSnapshot(path);
+    // 標記完一塊就切回選取（除非開著工具持續模式）。少了這一步，使用者
+    // 下一次在頁面上按下去又框出一塊待塗黑區域，而他以為自己在選取文字。
+    applyToolPersistence();
     statusBar()->showMessage(state->message, 5000);
 }
 
@@ -3002,10 +3320,19 @@ void MainWindow::saveDocumentAs() {
     // 這個架構下原檔的修改早就落盤了，「另存新檔」是分岔出一份副本，
     // 不是「把未存檔的東西存到別處」——不講的話使用者會以為原檔回到了
     // 乾淨的狀態（ADR-008）。
+    //
+    // 原檔名要在 openPath 之前取：openPath 會把 currentPath_ 換成新檔，
+    // 之後再讀它，訊息裡的兩個檔名會變成同一個。
+    const QString previousName = QFileInfo(currentPath_).fileName();
+    // 原檔的頁籤要關掉，不是留著。Acrobat 的「另存新檔」是切換而不是多開；
+    // 留著會變成兩個頁籤指向兩份內容相同的檔案，而使用者以為只有一份。
+    if (const auto located = tabs_.locate(app::normalizeDocumentPath(currentPath_))) {
+        (void)tabs_.closeTab(located->first, located->second);
+    }
     openPath(target);
     statusBar()->showMessage(
         tr("已另存為 %1；原檔 %2 保留先前所有修改")
-            .arg(QFileInfo(target).fileName(), QFileInfo(currentPath_).fileName()),
+            .arg(QFileInfo(target).fileName(), previousName),
         8000);
 }
 
@@ -3211,6 +3538,78 @@ void MainWindow::splitDocument() {
         return;
     }
     statusBar()->showMessage(result.message, 8000);
+}
+
+void MainWindow::rotatePagesByRange(const QString& label,
+                                    domain::pages::PageRotation rotation) {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, label, tr("尚未開啟文件"));
+        return;
+    }
+    if (!controller_->info().permissions.assemble) {
+        QMessageBox::warning(this, label, tr("此文件的權限設定不允許重組頁面"));
+        return;
+    }
+
+    bool accepted = false;
+    const QString text = QInputDialog::getText(
+        this, label,
+        tr("要旋轉哪幾頁？（例如 1,3,5-8 或 1-%1；共 %1 頁）").arg(controller_->pageCount()),
+        QLineEdit::Normal, QString::number(pageView_->pageIndex() + 1), &accepted);
+    if (!accepted) return;
+
+    const std::vector<int> pages = parsePageRange(text);
+    if (pages.empty()) {
+        QMessageBox::warning(this, label, tr("頁碼範圍不合法或超出文件頁數"));
+        return;
+    }
+    if (!confirmRewrite(label)) return;
+
+    commitPageOperation(label, [this, pages, rotation] {
+        return pageOps_->rotatePages(currentPath_, pages, rotation,
+                                     app::RewriteConsent::confirmed());
+    });
+}
+
+void MainWindow::movePagesByRange() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, tr("移動頁面"), tr("尚未開啟文件"));
+        return;
+    }
+    if (!controller_->info().permissions.assemble) {
+        QMessageBox::warning(this, tr("移動頁面"), tr("此文件的權限設定不允許重組頁面"));
+        return;
+    }
+
+    bool accepted = false;
+    const QString text = QInputDialog::getText(
+        this, tr("移動頁面"),
+        tr("要移動哪幾頁？（例如 1,3,5-8，共 %1 頁）").arg(controller_->pageCount()),
+        QLineEdit::Normal, QString::number(pageView_->pageIndex() + 1), &accepted);
+    if (!accepted) return;
+
+    const std::vector<int> pages = parsePageRange(text);
+    if (pages.empty()) {
+        QMessageBox::warning(this, tr("移動頁面"), tr("頁碼範圍不合法或超出文件頁數"));
+        return;
+    }
+
+    // 目的地以「插到第幾頁之前」表達，並允許等於總頁數＋1 代表移到最後。
+    // 用 0 起算的索引問使用者是介面設計的錯——頁碼在畫面上就是從 1 開始的。
+    const int before = QInputDialog::getInt(
+        this, tr("移動頁面"),
+        tr("移到第幾頁之前？（%1 代表移到最後）").arg(controller_->pageCount() + 1), 1, 1,
+        controller_->pageCount() + 1, 1, &accepted);
+    if (!accepted) return;
+
+    // 參數收齊了才問「會重寫整份檔案」。反過來的話，使用者同意重寫之後
+    // 還可以在下一個對話框按取消，而那個確認框當下沒有告訴他要選什麼。
+    if (!confirmRewrite(tr("移動頁面"))) return;
+
+    commitPageOperation(tr("移動頁面"), [this, pages, before] {
+        return pageOps_->movePages(currentPath_, pages, before - 1,
+                                   app::RewriteConsent::confirmed());
+    });
 }
 
 void MainWindow::deletePagesByRange() {
@@ -3544,6 +3943,8 @@ void MainWindow::createFormField(int pageIndex, const domain::RectF& pageRect) {
     updateUndoActions();
     controller_->setDocumentDirty();
     fileSnapshot_ = platform::captureSnapshot(path);
+    // 建完一個欄位切回選取，理由同標記塗黑：連續建立欄位不是預設意圖。
+    applyToolPersistence();
     statusBar()->showMessage(state->message, 5000);
 }
 
@@ -3768,18 +4169,23 @@ void MainWindow::replyToSelectedAnnotation(const QString& state) {
 }
 
 void MainWindow::copySelectedAnnotation() {
-    const int row = annotationList_->currentRow();
-    if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) {
-        statusBar()->showMessage(tr("請先在註解清單選一則註解"), 4000);
-        return;
+    const auto& items = controller_->annotations();
+    // 頁面上的選取優先於清單的目前列，理由與 deleteSelectedAnnotation 相同：
+    // 用「選取註解」工具點中的那一則可能被清單的篩選條件濾掉，這時清單的
+    // 目前列指的是別則註解。
+    std::size_t index = selectedAnnotation_;
+    if (index >= items.size()) {
+        const int row = annotationList_->currentRow();
+        if (row < 0 || row >= static_cast<int>(annotationOrder_.size())) {
+            statusBar()->showMessage(tr("請先選一則註解"), 4000);
+            return;
+        }
+        index = annotationOrder_[static_cast<std::size_t>(row)];
     }
     if (!controller_->info().permissions.copy) {
         statusBar()->showMessage(tr("此文件的權限設定不允許複製內容"), 5000);
         return;
     }
-
-    const std::size_t index = annotationOrder_[static_cast<std::size_t>(row)];
-    const auto& items = controller_->annotations();
     if (index >= items.size()) return;
     const domain::AnnotationSummary& target = items[index];
 
@@ -4058,13 +4464,73 @@ void MainWindow::applyPermissionRestrictions() {
     const domain::Permissions& permissions = controller_->info().permissions;
     const bool open = controller_->isOpen();
 
+    // 沒有文件時，需要文件的動作一律灰掉。
+    //
+    // 先前這件事是逐個函式各自處理的，而三種處理方式並存：有的跳「尚未開啟
+    // 文件」、有的直接 return（按了完全沒反應）、有的根本沒檢查（快速存取列
+    // 的儲存與列印永遠可按）。同一個狀態要有同一種表現，而唯一不會漏掉
+    // 下一個新動作的作法是在這裡依前綴判斷。
+    static const QStringList kDocumentPrefixes{
+        QStringLiteral("annot."),    QStringLiteral("comment."), QStringLiteral("page."),
+        QStringLiteral("document."), QStringLiteral("protect."), QStringLiteral("sign."),
+        QStringLiteral("form."),     QStringLiteral("nav."),     QStringLiteral("tool."),
+    };
+    static const QStringList kDocumentIds{
+        QStringLiteral("file.save"),        QStringLiteral("file.saveAs"),
+        QStringLiteral("file.revert"),      QStringLiteral("file.close"),
+        QStringLiteral("file.rename"),      QStringLiteral("file.print"),
+        QStringLiteral("file.printPreview"), QStringLiteral("file.exportText"),
+        QStringLiteral("file.exportImage"), QStringLiteral("file.email"),
+        QStringLiteral("file.properties"),  QStringLiteral("file.auditSpace"),
+        QStringLiteral("edit.copy"),        QStringLiteral("edit.cut"),
+        QStringLiteral("edit.paste"),       QStringLiteral("edit.selectAll"),
+        QStringLiteral("search.find"),      QStringLiteral("search.findNext"),
+        QStringLiteral("view.zoomIn"),      QStringLiteral("view.zoomOut"),
+        QStringLiteral("view.actualSize"),  QStringLiteral("view.fitPage"),
+        QStringLiteral("view.fitWidth"),    QStringLiteral("view.fitVisible"),
+        QStringLiteral("view.rotateClockwise"),
+        QStringLiteral("view.rotateCounterClockwise"),
+        QStringLiteral("view.readAloudToggle"), QStringLiteral("view.readAloudPause"),
+        QStringLiteral("view.autoscroll"),
+    };
+    // 面板開關即使沒有文件也該能按：使用者要先把面板叫出來，再開檔。
+    // 它們的 id 落在上面的前綴裡（comment.list、bookmark.manage…），
+    // 所以必須明確排除。
+    static const QStringList kAlwaysEnabled{
+        QStringLiteral("comment.list"),  QStringLiteral("bookmark.manage"),
+        QStringLiteral("search.advanced"), QStringLiteral("tool.persistent"),
+    };
+    for (const QString& id : actionRegistry_->ids()) {
+        if (kAlwaysEnabled.contains(id) || id.startsWith(QStringLiteral("view.panel."))) continue;
+        const bool needsDocument =
+            kDocumentIds.contains(id) ||
+            std::any_of(kDocumentPrefixes.begin(), kDocumentPrefixes.end(),
+                        [&id](const QString& prefix) { return id.startsWith(prefix); });
+        if (!needsDocument) continue;
+        QAction* action = actionRegistry_->action(id);
+        if (action == nullptr) continue;
+        if (!open) {
+            action->setEnabled(false);
+        } else if (!action->isEnabled()) {
+            // 重新啟用之後，底下的權限判斷會再把該灰的灰回去。
+            action->setEnabled(true);
+        }
+    }
+
     const auto restrict = [this, open](const QString& actionId, bool allowed,
                                        const QString& reason) {
         QAction* action = actionRegistry_->action(actionId);
         if (action == nullptr) return;
-        const bool usable = !open || allowed;
+        // 沒有文件時一律停用。
+        //
+        // 先前這裡是 `!open || allowed`——沒有文件時反而把動作打開，於是
+        // 上面那段「需要文件的一律灰掉」被這一行原封不動地撤銷。權限旗標
+        // 在沒有文件時沒有意義，但「沒有文件」本身就是停用的理由。
+        const bool usable = open && allowed;
         action->setEnabled(usable);
-        if (!usable) {
+        // 說明只在真的是權限擋下來時才掛：沒有文件時掛上「此文件的權限
+        // 設定不允許…」是在描述一份不存在的文件。
+        if (open && !allowed) {
             action->setToolTip(reason);
         } else if (action->toolTip() == reason) {
             // 只清掉自己設的那一則。無條件清空會把別處設定的說明也一起洗掉。
@@ -4087,10 +4553,17 @@ void MainWindow::applyPermissionRestrictions() {
     restrict(QStringLiteral("file.exportText"), permissions.copy, noCopy);
     restrict(QStringLiteral("file.exportImage"), permissions.copy, noCopy);
 
-    for (const char* id : {"annot.highlight", "annot.underline", "annot.strikeout",
-                           "annot.stickyNote", "annot.rectangle", "annot.ellipse", "annot.line",
-                           "annot.arrow", "annot.polygon", "annot.polyline", "annot.cloud",
-                           "comment.delete"}) {
+    // 所有 annot.* 前綴的動作一起灰化，而不是一張逐一列舉的清單。
+    //
+    // 先前那張清單漏掉文字方塊、打字機、指示框、鉛筆、校正符號、圖章、
+    // 量測與附件——而漏掉的方式是「沒有人在加新工具時想到要回來加一行」。
+    // 用前綴掃描之後，下一個新工具自動被蓋到。
+    for (const QString& id : actionRegistry_->ids()) {
+        if (!id.startsWith(QStringLiteral("annot."))) continue;
+        restrict(id, permissions.annotate, noAnnotate);
+    }
+    for (const char* id : {"comment.delete", "comment.reply", "comment.setStatus",
+                           "comment.import", "comment.paste", "edit.paste", "edit.cut"}) {
         restrict(QString::fromLatin1(id), permissions.annotate, noAnnotate);
     }
 
@@ -4366,7 +4839,9 @@ void MainWindow::runSearch() {
     searchResults_->clear();
     if (query.isEmpty()) return;
     statusBar()->showMessage(tr("搜尋中…"));
-    selection_->search(query, pageView_->pageIndex(), false, false);
+    selection_->search(query, pageView_->pageIndex(),
+                       searchMatchCase_ != nullptr && searchMatchCase_->isChecked(),
+                       searchWholeWord_ != nullptr && searchWholeWord_->isChecked());
 }
 
 void MainWindow::populateOutline() {
@@ -4405,6 +4880,115 @@ void MainWindow::populateOutline() {
     outlineTree_->expandToDepth(1);
 }
 
+void MainWindow::commitThumbnailReorder(int from, int to) {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) return;
+
+    // 先把清單還原成文件目前的樣子。使用者接下來可能按取消，而那時清單
+    // 若停在他拖過的位置上，畫面就在說一件檔案裡沒有發生的事。
+    reorderingThumbnails_ = true;
+    populateThumbnails();
+    reorderingThumbnails_ = false;
+
+    // 拖曳是所有手勢裡最容易誤觸的一個：在縮圖上按住稍微滑一下就是一次拖放。
+    // 而移動頁面會重寫整份檔案，有簽章的文件會就此失效——其他每一個重寫類
+    // 操作都會先問，這一個先前不會。
+    if (!confirmRewrite(tr("移動頁面"))) return;
+
+    const std::vector<int> pages{from};
+    commitPageOperation(tr("移動頁面"), [this, pages, to] {
+        return pageOps_->movePages(currentPath_, pages, to, app::RewriteConsent::confirmed());
+    });
+}
+
+void MainWindow::requestAnnotationsAround(int pageIndex) {
+    if (!controller_->isOpen() || pageIndex < 0) return;
+    // 前後各 16 頁。窗口要比「目前這一頁」大：使用者翻頁的速度遠快於
+    // 掃描回來的速度，只掃當前頁的話清單永遠落後一步。
+    constexpr int kWindow = 16;
+    controller_->requestAnnotations(pageIndex - kWindow, pageIndex + kWindow);
+}
+
+void MainWindow::refreshAfterReload() {
+    if (currentPath_.isEmpty()) return;
+
+    // 之後的寫入都以這一刻的檔案狀態為基準。少了這一行，下一次寫入前的
+    // 外部變更守衛會拿開檔時的快照去比對一個「已經被我們自己改過」的檔案，
+    // 然後對使用者謊稱「這份文件被其他程式修改過」。
+    fileSnapshot_ = platform::captureSnapshot(currentPath_);
+    applyPermissionRestrictions();
+
+    const auto& info = controller_->info();
+    QStringList notices;
+    if (info.hasXfa) notices << tr("XFA 表單：僅顯示後備內容");
+    if (info.hasJavaScript) notices << tr("內嵌 JavaScript：不執行");
+    if (info.hasSignatures) {
+        notices << tr("含數位簽章");
+        signaturePanel_->refresh();
+    }
+    noticeLabel_->setText(notices.join(QStringLiteral("　|　")));
+
+    // 頁碼標籤要反映**現在這一頁**，不是第 1 頁。
+    const int page = pageView_ != nullptr ? pageView_->pageIndex() : 0;
+    pageLabel_->setText(tr("第 %1 / %2 頁").arg(page + 1).arg(controller_->pageCount()));
+
+    refreshThumbnailImages();
+    reloadNavigationPanels(currentPath_);
+    controller_->requestLayers();
+    forms_->openDocument(currentPath_);
+    requestAnnotationsAround(page);
+}
+
+void MainWindow::refreshThumbnailImages() {
+    if (thumbnailList_ == nullptr) return;
+    const int pages = controller_->pageCount();
+
+    // 頁數變了（插入／刪除／擷取）才整份重建。頁數沒變時重建等於把使用者
+    // 捲到的位置與選取一起丟掉，而他只是加了一則註解。
+    if (pages != thumbnailList_->count()) {
+        populateThumbnails();
+        return;
+    }
+
+    // 內容變了，但格子還是那些格子：清掉「已經要過」的紀錄讓它們重新渲染，
+    // 舊圖示留在畫面上直到新的到達——那比先清空再等待好，清空會讓整排縮圖
+    // 在每一次註解之後閃一下白。
+    requestedThumbnails_.clear();
+    requestVisibleThumbnails();
+}
+
+void MainWindow::clearDocumentUi() {
+    // 沒有文件了，面板上留著的每一樣東西都在說謊——縮圖指向不存在的頁，
+    // 點下去會跳到一份已經關掉的文件；書籤、註解、搜尋結果同理。
+    currentPath_.clear();
+    fileSnapshot_ = {};
+
+    thumbnailList_->clear();
+    requestedThumbnails_.clear();
+    outlineTree_->clear();
+    annotationList_->clear();
+    annotationOrder_.clear();
+    searchResults_->clear();
+
+    layersPanel_->setTree({});
+    fieldsPanel_->setFields({});
+    // 空路徑代表關檔：這個函式本來就把「沒有文件」當成一種狀態處理。
+    reloadNavigationPanels({});
+    signatures_->closeDocument();
+    signaturePanel_->refresh();
+    forms_->closeDocument();
+
+    // 復原堆疊屬於那一份文件。留著的話，關檔後按復原會把命令套到
+    // 下一份開啟的文件上——那是不可逆的資料破壞，不只是介面不同步。
+    commands_->clear();
+    updateUndoActions();
+
+    pageLabel_->setText(tr("未開啟文件"));
+    noticeLabel_->clear();
+    updateWindowTitle({});
+    applyPermissionRestrictions();
+    updateNavigationActions();
+}
+
 void MainWindow::populateThumbnails() {
     thumbnailList_->clear();
     requestedThumbnails_.clear();
@@ -4414,9 +4998,28 @@ void MainWindow::populateThumbnails() {
         item->setTextAlignment(Qt::AlignHCenter);
     }
 
+    // 開檔後選取要落在目前這一頁，不能停在「沒有選取」。
+    // 沒有選取的清單看不出自己在哪一頁，鍵盤進來時也沒有起點。
+    if (pageView_ != nullptr) syncThumbnailSelection(pageView_->pageIndex());
+
     // 只先要看得到的那幾張。整份文件一次要縮圖，在一萬頁的文件上等於自殺——
     // 縮圖任務即使是最低優先權，也會把佇列塞滿並延後可見圖磚。
     requestVisibleThumbnails();
+}
+
+void MainWindow::syncThumbnailSelection(int pageIndex) {
+    // 縮圖是使用者判斷「我在哪一頁」的主要依據。選取停在上次點過的那一格，
+    // 等於面板在說謊——而且會讓「再點一次回到那一頁」失去意義。
+    if (thumbnailList_ == nullptr || reorderingThumbnails_) return;
+    if (pageIndex < 0 || pageIndex >= thumbnailList_->count()) return;
+    if (thumbnailList_->currentRow() == pageIndex) return;
+
+    // 這一次選取變化是「跟著檢視區走」，不可以反過來去動檢視區：
+    // 使用者捲到頁面中段時被拉回頁首，捲動就變成一格一格跳。
+    syncingThumbnailSelection_ = true;
+    thumbnailList_->setCurrentRow(pageIndex);
+    thumbnailList_->scrollToItem(thumbnailList_->item(pageIndex));
+    syncingThumbnailSelection_ = false;
 }
 
 void MainWindow::requestVisibleThumbnails() {
@@ -4437,8 +5040,9 @@ void MainWindow::requestVisibleThumbnails() {
     //
     // 幾何算法則是確定的：格子大小是我們自己設的，捲軸位置是像素。
     const int spacing = thumbnailList_->spacing();
-    const int cellWidth = std::max(1, kThumbnailGridSize.width() + 2 * spacing);
-    const int cellHeight = std::max(1, kThumbnailGridSize.height() + 2 * spacing);
+    const QSize cell = thumbnailCellSize();
+    const int cellWidth = std::max(1, cell.width() + 2 * spacing);
+    const int cellHeight = std::max(1, cell.height() + 2 * spacing);
     const int columns = std::max(1, viewport.width() / cellWidth);
     const int rows = viewport.height() / cellHeight + 2;  // +2：半露的頭尾兩列
     const int visibleCount = std::max(1, columns * rows);
@@ -4462,7 +5066,13 @@ void MainWindow::requestVisibleThumbnails() {
         // 排進佇列幾十次，而那條 PDFium 執行緒是全行程唯一的一條。
         if (requestedThumbnails_.contains(i)) continue;
         requestedThumbnails_.insert(i);
-        controller_->requestThumbnail(i);
+        // 要的解析度跟著紙張方框走，還要乘上裝置像素比。用預設值（160）在
+        // 高 DPI 螢幕上會被放大，縮圖看起來糊成一團，而那不是渲染的問題，
+        // 是要小了。
+        const QSize box = thumbnailPageBox();
+        const int edge = static_cast<int>(
+            std::lround(std::max(box.width(), box.height()) * devicePixelRatioF()));
+        controller_->requestThumbnail(i, edge);
     }
 }
 
@@ -4603,7 +5213,9 @@ void MainWindow::buildPanelActions() {
 
     // 使用者書籤（PRD-NAV-005）。存在使用者端而不寫進文件——
     // 審閱者對唯讀或已簽章文件也要能做標記。
-    auto* markAction = new QAction(tr("加入閱讀書籤"), this);
+    // 這是**使用者端**的閱讀標記（PRD-NAV-005），不寫進文件的 /Outlines。
+    // 先前它叫「新增書籤」，於是使用者按完會去書籤面板找一個不存在的東西。
+    auto* markAction = new QAction(tr("加入閱讀標記"), this);
     markAction->setShortcut(QKeySequence(QStringLiteral("Ctrl+B")));
     connect(markAction, &QAction::triggered, this, [this] {
         if (currentPath_.isEmpty()) return;
@@ -4675,11 +5287,36 @@ void MainWindow::buildStatusBar() {
     pageLabel_->setObjectName(QStringLiteral("statusPageLabel"));
     pageLabel_->setAccessibleName(tr("目前頁碼"));
 
-    zoomLabel_ = new QLabel(QStringLiteral("100%"), this);
-    zoomLabel_->setObjectName(QStringLiteral("statusZoomLabel"));
-    // 「100%」本身沒有說明它是什麼。螢幕閱讀器念出裸數字時，
-    // 使用者無法分辨那是縮放、頁碼還是進度。
-    zoomLabel_->setAccessibleName(tr("縮放比例"));
+    // 縮放要能打字輸入，不是只能看。
+    //
+    // 先前這裡是一個 QLabel：要到 137% 只能反覆按 Ctrl+加號，而工程圖審閱
+    // 常常需要一個明確的倍率。可編輯的下拉同時給了常用值與任意值。
+    zoomBox_ = new QComboBox(this);
+    zoomBox_->setObjectName(QStringLiteral("statusZoomBox"));
+    zoomBox_->setAccessibleName(tr("縮放比例"));
+    zoomBox_->setEditable(true);
+    zoomBox_->setInsertPolicy(QComboBox::NoInsert);
+    for (const int percent : {8, 25, 50, 75, 100, 125, 150, 200, 400, 800, 1600, 6400}) {
+        zoomBox_->addItem(QStringLiteral("%1%").arg(percent), percent);
+    }
+    zoomBox_->setCurrentText(QStringLiteral("100%"));
+    const auto applyTypedZoom = [this] {
+        if (pageView_ == nullptr) return;
+        // 接受「150」「150%」「 150 % 」；認不出來就退回目前倍率，
+        // 不要讓一次打錯把畫面縮到 8%。
+        QString text = zoomBox_->currentText().trimmed();
+        text.remove(QLatin1Char('%'));
+        bool ok = false;
+        const double percent = text.toDouble(&ok);
+        if (!ok || percent <= 0.0) {
+            zoomBox_->setCurrentText(
+                QStringLiteral("%1%").arg(static_cast<int>(pageView_->scale() * 100.0)));
+            return;
+        }
+        pageView_->setScale(percent / 100.0);
+    };
+    connect(zoomBox_->lineEdit(), &QLineEdit::editingFinished, this, applyTypedZoom);
+    connect(zoomBox_, &QComboBox::activated, this, [applyTypedZoom](int) { applyTypedZoom(); });
 
     // 頁面尺寸與游標位置（PDF-XChange 的 Show Page Size / Position）。
     //
@@ -4699,7 +5336,7 @@ void MainWindow::buildStatusBar() {
     statusBar()->addWidget(pageLabel_);
     statusBar()->addPermanentWidget(noticeLabel_);
     statusBar()->addPermanentWidget(geometryLabel_);
-    statusBar()->addPermanentWidget(zoomLabel_);
+    statusBar()->addPermanentWidget(zoomBox_);
 }
 
 void MainWindow::setSplitMode(SplitMode mode) {
@@ -4841,12 +5478,35 @@ void MainWindow::printDocument() {
     app::print::PrintOptions options;
     options.includeAnnotations = true;
 
-    const app::print::PrintResult result = service.print(printer, options);
+    // 進度對話框，而且可以取消。
+    //
+    // 先前這裡是一次同步的 service.print()：500 頁工程圖會讓整個視窗凍住
+    // 幾十秒，沒有進度、不能中斷，而使用者只會以為程式當掉並開始亂點。
+    // 列印必須留在 GUI 執行緒（QPainter 畫在 QPrinter 上在 Windows 只能
+    // 在這裡做），所以做法是每印完一張就推一次事件迴圈。
+    QProgressDialog progress(tr("列印中…"), tr("取消"), 0, 0, this);
+    progress.setWindowTitle(tr("列印"));
+    progress.setWindowModality(Qt::ApplicationModal);
+    // 不要一按下列印就跳一個對話框：短文件在使用者看到它之前就印完了，
+    // 而閃一下的對話框比沒有更煩。
+    progress.setMinimumDuration(500);
+    progress.setValue(0);
+
+    const app::print::PrintResult result =
+        service.print(printer, options, [&progress](int printed, int total) {
+            progress.setMaximum(total);
+            progress.setValue(printed);
+            progress.setLabelText(tr("列印中… 第 %1 / %2 張").arg(printed).arg(total));
+            QCoreApplication::processEvents();
+            return !progress.wasCanceled();
+        });
+    progress.reset();
+
     if (!result.ok) {
         QMessageBox::warning(this, tr("列印"), result.message);
         return;
     }
-    statusBar()->showMessage(tr("已送出 %1 張").arg(result.sheetsPrinted), 5000);
+    statusBar()->showMessage(result.message, 5000);
 }
 
 void MainWindow::registerRibbonAction(const QString& id, QAction* action) {
@@ -5231,6 +5891,158 @@ void MainWindow::manageTrustedCertificates() {
     if (!currentPath_.isEmpty() && controller_->isOpen()) signatures_->verify();
 }
 
+void MainWindow::showSecurityInfo() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, tr("安全性與權限"), tr("尚未開啟文件"));
+        return;
+    }
+
+    QFile file(currentPath_);
+    if (!file.open(QIODevice::ReadOnly)) {
+        QMessageBox::warning(this, tr("安全性與權限"),
+                             tr("無法讀取檔案：%1").arg(file.errorString()));
+        return;
+    }
+    const QByteArray bytes = file.readAll();
+    file.close();
+
+    // 加密資訊只看原始位元組就答得出來：/Encrypt 字典本身不是加密內容。
+    const engine::save::SecurityInfo info = engine::save::inspectEncryption(
+        std::string(bytes.constData(), static_cast<std::size_t>(bytes.size())));
+
+    QStringList lines;
+    lines << tr("加密：%1").arg(info.encrypted ? tr("是") : tr("否"));
+    if (info.encrypted) {
+        // 有 /Encrypt 卻認不出演算法時明說，而不是照預設值亂猜——
+        // 使用者可能正要判斷這份文件能不能寄出去。
+        lines << tr("演算法：%1").arg(info.algorithmKnown
+                                          ? QString::fromUtf8(describe(info.algorithm))
+                                          : tr("無法確認"));
+        if (info.securityHandlerRevision >= 0) {
+            lines << tr("安全處理器修訂版：%1").arg(info.securityHandlerRevision);
+        }
+    }
+    lines << QString();
+
+    // 權限旗標取自已解鎖的文件（controller_->info()），不是 /Encrypt 字典——
+    // 兩者在使用者密碼與擁有者密碼不同時會給出不同的答案。
+    const domain::Permissions& permissions = controller_->info().permissions;
+    const auto row = [](const QString& name, bool allowed) {
+        return QStringLiteral("%1：%2").arg(
+            name, allowed ? QObject::tr("允許") : QObject::tr("不允許"));
+    };
+    lines << row(tr("列印"), permissions.print);
+    lines << row(tr("高品質列印"), permissions.printHighQuality);
+    lines << row(tr("修改"), permissions.modify);
+    lines << row(tr("複製內容"), permissions.copy);
+    lines << row(tr("加註"), permissions.annotate);
+    lines << row(tr("填寫表單"), permissions.fillForms);
+    lines << row(tr("組合頁面"), permissions.assemble);
+    lines << QString();
+    // 這一句是誠實的必要成分：權限旗標只有在文件加密時才有強制力，
+    // 而任何人都能用別的工具把它拿掉。把它當成保護會讓人以為內容真的被鎖住。
+    lines << tr("權限旗標只有在文件加密時才有強制力，而且任何工具都能忽略它。"
+                "它表達的是文件作者的意圖，不是一道防線。");
+
+    QMessageBox box(this);
+    box.setWindowTitle(tr("安全性與權限"));
+    box.setText(tr("%1 的安全性").arg(QFileInfo(currentPath_).fileName()));
+    box.setInformativeText(lines.join(QStringLiteral("\n")));
+    box.setIcon(QMessageBox::Information);
+    box.exec();
+}
+
+void MainWindow::setDocumentPassword() {
+    // 明確回報不支援，而不是讓選單項目根本不存在。
+    //
+    // 不存在會讓人以為這個功能還沒排進計畫；灰掉又沒有說明。真正該讓使用者
+    // 知道的是「為什麼做不到」與「那我該怎麼辦」，而那句話只有這裡說得出來。
+    const engine::save::SetPasswordResult result = engine::save::setPassword("", "", 0);
+    QMessageBox box(this);
+    box.setWindowTitle(tr("密碼保護"));
+    box.setIcon(QMessageBox::Information);
+    box.setText(tr("目前無法為文件設定新密碼。"));
+    box.setInformativeText(
+        tr("%1\n\n"
+           "產生加密的 PDF 需要自行實作整條 PDF 加密管線，"
+           "而本產品定案使用的預編譯 PDFium 沒有輸出加密文件的公開 API。\n\n"
+           "已經加密的文件仍然可以開啟、檢視與（在權限允許時）編輯，"
+           "也可以用「移除密碼與加密」解除保護。")
+            .arg(QString::fromStdString(result.message)));
+    box.exec();
+}
+
+void MainWindow::removeDocumentSecurity() {
+    if (currentPath_.isEmpty() || !controller_->isOpen()) {
+        QMessageBox::information(this, tr("移除密碼與加密"), tr("尚未開啟文件"));
+        return;
+    }
+    if (!controller_->info().encrypted) {
+        QMessageBox::information(this, tr("移除密碼與加密"), tr("這份文件沒有加密。"));
+        return;
+    }
+
+    // 整份解密重寫，所以會破壞既有簽章——與其他重寫類操作用同一條確認流程，
+    // 但多說一句「輸出不再需要密碼」：那正是使用者要的結果，也是他要負的責任。
+    QString warning = tr("將輸出一份**不需要密碼**的副本內容並取代目前的檔案。\n\n"
+                         "這個操作會重寫整份檔案。");
+    if (controller_->info().hasSignatures) {
+        warning += tr("\n\n這份文件含數位簽章，操作後簽章將失效，且無法復原為有效狀態。");
+    }
+    warning += tr("\n\n要繼續嗎？");
+    if (QMessageBox::warning(this, tr("移除密碼與加密"), warning,
+                             QMessageBox::Yes | QMessageBox::Cancel,
+                             QMessageBox::Cancel) != QMessageBox::Yes) {
+        return;
+    }
+    if (!confirmNoExternalChange(tr("移除密碼與加密"))) return;
+
+    // 走 PageEditor 而不是另開一條引擎路徑：它已經是全檔重寫類操作共用的
+    // 那一個把手，SaveOptions::removeSecurity 對應 FPDF_REMOVE_SECURITY。
+    engine::pages::PageEditor editor;
+    if (!editor.open(currentPath_.toStdString(), "")) {
+        QMessageBox::warning(this, tr("移除密碼與加密"), tr("無法開啟文件"));
+        return;
+    }
+
+    // 先寫到旁邊再取代，不直接覆寫：解密失敗時原檔必須完好，
+    // 而那份原檔是使用者唯一能打開這些內容的東西。
+    const QString temporary = currentPath_ + QStringLiteral(".decrypted.tmp");
+    engine::save::SaveOptions options;
+    options.removeSecurity = true;
+    if (!editor.saveAsCopy(temporary.toStdString(), options).ok()) {
+        QFile::remove(temporary);
+        QMessageBox::warning(this, tr("移除密碼與加密"), tr("解密輸出失敗"));
+        return;
+    }
+
+    QFile source(temporary);
+    if (!source.open(QIODevice::ReadOnly)) {
+        QFile::remove(temporary);
+        QMessageBox::warning(this, tr("移除密碼與加密"), tr("無法讀回解密後的內容"));
+        return;
+    }
+    const QByteArray decrypted = source.readAll();
+    source.close();
+    QFile::remove(temporary);
+
+    platform::AtomicFileWriter writer(currentPath_);
+    if (!writer.begin() || !writer.write(decrypted.constData(),
+                                         static_cast<std::size_t>(decrypted.size())) ||
+        !writer.commit()) {
+        QMessageBox::warning(this, tr("移除密碼與加密"), tr("寫檔失敗，原檔未變動"));
+        return;
+    }
+
+    // 不進命令堆疊：復原路徑得保留一份完整的加密原檔在記憶體裡，而那份
+    // 東西正是使用者要求丟掉的。與「清除所有簽章欄位」同一個判斷。
+    commands_->clear();
+    updateUndoActions();
+    fileSnapshot_ = platform::captureSnapshot(currentPath_);
+    reloadCurrentDocument();
+    statusBar()->showMessage(tr("已移除密碼與加密（%1 KB）").arg(decrypted.size() / 1024), 8000);
+}
+
 void MainWindow::auditSpaceUsage() {
     if (currentPath_.isEmpty() || !controller_->isOpen()) {
         QMessageBox::information(this, tr("空間使用稽核"), tr("尚未開啟文件"));
@@ -5499,20 +6311,39 @@ void MainWindow::rebuildRecentMenu() {
     connect(clear, &QAction::triggered, this, [this] { settings_->clearRecentFiles(); });
 }
 
+namespace {
+
+// 拖進來的東西裡有哪些是本機 PDF。多檔拖放在多頁籤（PRD-UI-001）接上之後
+// 就有意義了——先前這裡只收單一檔案，拖兩個進來會被靜默拒絕（游標顯示禁止），
+// 而使用者看不出原因。
+QStringList localPdfsIn(const QMimeData* mime) {
+    QStringList paths;
+    if (mime == nullptr || !mime->hasUrls()) return paths;
+    for (const QUrl& url : mime->urls()) {
+        if (!url.isLocalFile()) continue;
+        const QString path = url.toLocalFile();
+        if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) continue;
+        paths << path;
+    }
+    return paths;
+}
+
+}  // namespace
+
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
-    // 只接受單一 PDF。多檔拖放要等多頁籤（PRD-UI-001）接上才有意義。
-    const QMimeData* mime = event->mimeData();
-    if (!mime->hasUrls()) return;
-    const QList<QUrl> urls = mime->urls();
-    if (urls.size() != 1 || !urls.front().isLocalFile()) return;
-    if (!urls.front().toLocalFile().endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)) return;
+    if (localPdfsIn(event->mimeData()).isEmpty()) return;
     event->acceptProposedAction();
 }
 
 void MainWindow::dropEvent(QDropEvent* event) {
-    const QList<QUrl> urls = event->mimeData()->urls();
-    if (urls.isEmpty()) return;
-    openPath(urls.front().toLocalFile());
+    const QStringList paths = localPdfsIn(event->mimeData());
+    if (paths.isEmpty()) return;
+    // 每一份各開一個頁籤，最後一個成為作用中的那一個——與檔案對話框多選
+    // 的行為一致。
+    for (const QString& path : paths) openPath(path);
+    if (paths.size() > 1) {
+        statusBar()->showMessage(tr("已開啟 %1 份文件").arg(paths.size()), 5000);
+    }
     event->acceptProposedAction();
 }
 
@@ -5538,8 +6369,12 @@ void MainWindow::closeTab(int index) {
     if (window == nullptr || index < 0 || index >= static_cast<int>(window->tabs.size())) return;
 
     const bool closingActive = index == window->activeIndex;
+    const QString closingPath = window->tabs[static_cast<std::size_t>(index)].documentId;
     (void)tabs_.closeTab(tabs_.primaryWindowId(), index);
     syncTabBar();
+    // 那一份的復原堆疊跟著走。留著只是佔記憶體——它的命令全都指向一個
+    // 已經不在頁籤列上的檔案。
+    dropStackFor(closingPath);
 
     const app::WindowState* after = tabs_.window(tabs_.primaryWindowId());
     if (after == nullptr || after->tabs.empty()) {
@@ -5565,7 +6400,7 @@ void MainWindow::detachTab(int index) {
 
     // 新視窗是完整的 MainWindow：它自己的控制器、自己的 PDFium 執行緒、
     // 自己的面板。共用一個控制器的話，兩個視窗會互相搶著開不同的檔案。
-    auto* detached = new MainWindow();
+    auto* detached = new MainWindow(WindowRole::Detached);
     detached->setAttribute(Qt::WA_DeleteOnClose);
     detached->show();
     detached->openPath(path);
@@ -5604,10 +6439,35 @@ void MainWindow::loadDocument(const QString& path) {
     storeReadingPosition();
     currentPath_ = path;
     settings_->addRecentFile(path);
-    commands_->clear();
+    // 每個頁籤各自一份復原堆疊。
+    //
+    // 先前這裡是 commands_->clear()：在 A 加了三則註解、切到 B 再切回 A，
+    // 那三步就不能復原了，而畫面上沒有任何跡象說明為什麼。復原命令的
+    // lambda 都以值捕捉自己的路徑，所以分開來放不會互相污染。
+    commands_ = stackFor(path);
     updateUndoActions();
     controller_->openDocument(path);
     selection_->openDocument(path);
+}
+
+app::CommandStack* MainWindow::stackFor(const QString& path) {
+    const QString key = app::normalizeDocumentPath(path);
+    auto it = commandStacks_.find(key);
+    if (it != commandStacks_.end() && it.value() != nullptr) return it.value();
+    auto* stack = new app::CommandStack(this);
+    commandStacks_.insert(key, stack);
+    return stack;
+}
+
+void MainWindow::dropStackFor(const QString& path) {
+    const QString key = app::normalizeDocumentPath(path);
+    const auto it = commandStacks_.find(key);
+    if (it == commandStacks_.end()) return;
+    app::CommandStack* stack = it.value();
+    commandStacks_.erase(it);
+    if (stack == nullptr) return;
+    if (commands_ == stack) commands_ = defaultCommands_;
+    stack->deleteLater();
 }
 
 QString MainWindow::annotationAuthor() const {
@@ -5617,6 +6477,15 @@ QString MainWindow::annotationAuthor() const {
 
 void MainWindow::commitAnnotation(app::AnnotationRequest request, const QString& label) {
     if (currentPath_.isEmpty()) return;
+    // 權限檢查放在這個唯一入口。
+    //
+    // 先前只有鉛筆、塗黑標記、附件等少數幾條路徑自己檢查，而文字方塊、
+    // 打字機、指示框、校正符號、圖章、量測都沒有——禁止加註的文件仍然
+    // 可以被加上那六種註解。灰化清單也蓋不到它們（PRD-SEC-001）。
+    if (!controller_->info().permissions.annotate) {
+        statusBar()->showMessage(tr("此文件的權限設定不允許加註"), 5000);
+        return;
+    }
     if (!confirmNoExternalChange(label)) return;
     request.path = currentPath_;
 
@@ -5649,6 +6518,12 @@ void MainWindow::commitAnnotation(app::AnnotationRequest request, const QString&
     }
     updateUndoActions();
     controller_->setDocumentDirty();
+    // 檔案剛被我們自己改過，基準必須當場更新。
+    //
+    // 重載完成時也會更新一次，但重載是非同步的——跨頁標記會在同一輪事件裡
+    // 連續寫好幾次，第二次的外部變更守衛於是拿開檔時的快照去比對一個已經
+    // 長大的檔案，然後對使用者謊稱「這份文件被其他程式修改過」。
+    fileSnapshot_ = platform::captureSnapshot(request.path);
     applyToolPersistence();
     statusBar()->showMessage(state->message, 5000);
 }
@@ -5705,7 +6580,14 @@ void MainWindow::editAlternateText(int structElementObjectNumber, const QString&
 }
 
 void MainWindow::applyTextMarkup(domain::TextMarkupKind kind, const QString& label) {
-    const app::Selection& current = selection_->selection();
+    // **以值取一份**，不是參照。
+    //
+    // selection() 回傳的是 SelectionController 內部那一份的參照，而底下的
+    // commitAnnotation() 會同步寫檔並重載文件，重載會 clearSelection()——
+    // 整份 Selection 被重新指派，current.pages 的儲存體就地釋放。
+    // 跨頁迴圈的第二圈於是在迭代一塊已經還給配置器的記憶體：release 建置下
+    // 多半表現為「第二頁沒有標記」，沒有任何錯誤訊息。
+    const app::Selection current = selection_->selection();
     if (current.isEmpty()) {
         QMessageBox::information(this, label, tr("請先選取文字"));
         return;
@@ -5845,6 +6727,17 @@ void MainWindow::applyShape(int pageIndex, const domain::RectF& pageRect) {
             domain::TextNoteGeometry note;
             annotation.geometry = note;
             annotation.color = domain::ColorRgb{1.0, 0.85, 0.0};
+            // 便利貼允許「點一下就放」，那時 rect 是一個點。零尺寸的 /Rect
+            // 在 Acrobat 上仍然畫得出圖示（它忽略大小），但以 /BBox 為準的
+            // 檢視器會什麼都不畫——同一份文件在兩邊看到的東西不一樣。
+            // 撐成圖示的標準大小（ISO 32000-1 §12.5.6.4 的慣例是 20×20 點）。
+            constexpr double kNoteIconSizePt = 20.0;
+            const domain::RectF box = pageRect.normalized();
+            if (box.width() < kNoteIconSizePt || box.height() < kNoteIconSizePt) {
+                annotation.rect = domain::RectF{box.left, box.bottom,
+                                                box.left + kNoteIconSizePt,
+                                                box.bottom + kNoteIconSizePt};
+            }
             label = tr("便利貼");
             break;
         }
@@ -5853,7 +6746,46 @@ void MainWindow::applyShape(int pageIndex, const domain::RectF& pageRect) {
             label = tr("校正符號");
             break;
         case Tool::Stamp: {
+            // 先問是哪一種圖章。
+            //
+            // 先前這裡一律寫出 Approved，而介面上沒有任何地方能選——
+            // 使用者想蓋「機密」只能得到「已核准」，兩者的意思相反。
+            struct StampChoice {
+                domain::StampKind kind;
+                const char* label;
+            };
+            static const StampChoice kChoices[] = {
+                {domain::StampKind::Approved, QT_TR_NOOP("已核准")},
+                {domain::StampKind::NotApproved, QT_TR_NOOP("未核准")},
+                {domain::StampKind::Draft, QT_TR_NOOP("草稿")},
+                {domain::StampKind::Final, QT_TR_NOOP("定稿")},
+                {domain::StampKind::Confidential, QT_TR_NOOP("機密")},
+                {domain::StampKind::ForComment, QT_TR_NOOP("供審閱")},
+                {domain::StampKind::Experimental, QT_TR_NOOP("實驗性")},
+                {domain::StampKind::AsIs, QT_TR_NOOP("現狀")},
+                {domain::StampKind::Expired, QT_TR_NOOP("已過期")},
+                {domain::StampKind::TopSecret, QT_TR_NOOP("最高機密")},
+                {domain::StampKind::ForPublicRelease, QT_TR_NOOP("可公開")},
+                {domain::StampKind::NotForPublicRelease, QT_TR_NOOP("不可公開")},
+                {domain::StampKind::Sold, QT_TR_NOOP("已售出")},
+                {domain::StampKind::Departmental, QT_TR_NOOP("部門用")},
+            };
+            QStringList names;
+            for (const StampChoice& choice : kChoices) names << tr(choice.label);
+
+            bool accepted = false;
+            // 記住上一次的選擇：連續蓋同一種圖章是最常見的用法，每次都要
+            // 從頭捲到「機密」那一項會讓這個工具用起來很煩。
+            const QString chosen = QInputDialog::getItem(this, tr("圖章"), tr("圖章樣式："),
+                                                         names, lastStampChoice_, false,
+                                                         &accepted);
+            if (!accepted) return;
+            const int index = names.indexOf(chosen);
+            if (index < 0) return;
+            lastStampChoice_ = index;
+
             domain::StampGeometry stamp;
+            stamp.kind = kChoices[index].kind;
             annotation.geometry = stamp;
             label = tr("圖章");
             break;
@@ -6009,6 +6941,8 @@ void MainWindow::commitPageOperation(const QString& label,
     }
     updateUndoActions();
     controller_->setDocumentDirty();
+    // 理由同 commitAnnotation：重載是非同步的，快照要當場更新。
+    fileSnapshot_ = platform::captureSnapshot(currentPath_);
     statusBar()->showMessage(state->message, 6000);
 }
 
@@ -6018,8 +6952,9 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     registerRibbonAction(QStringLiteral("page.insertFromFile"), insertFromFileAction);
     registerRibbonAction(QStringLiteral("page.insert"), insertFromFileAction);
     connect(insertFromFileAction, &QAction::triggered, this, [this] {
-        if (!confirmRewrite(tr("從檔案插入頁面"))) return;
-
+        // 參數收齊了才問「會重寫整份檔案」。反過來的話，使用者同意重寫之後
+        // 還可以在下一個對話框按取消，而那個確認框當下並沒有告訴他接下來
+        // 要選什麼——他是在對一個還不存在的操作說「好」。
         const QString source = QFileDialog::getOpenFileName(
             this, tr("選擇要插入的 PDF"), QString(), tr("PDF 檔案 (*.pdf)"));
         if (source.isEmpty()) return;
@@ -6040,6 +6975,7 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
             controller_->pageCount() + 1, 1, controller_->pageCount() + 1, 1, &accepted);
         if (!accepted) return;
 
+        if (!confirmRewrite(tr("從檔案插入頁面"))) return;
         commitPageOperation(tr("從檔案插入頁面"), [this, source, before] {
             return pageOps_->insertPagesFrom(currentPath_, source, before - 1, {},
                                              app::RewriteConsent::confirmed());
@@ -6050,8 +6986,6 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     auto* insertTextAction = menu->addAction(tr("插入文字頁面..."));
     registerRibbonAction(QStringLiteral("page.insertFromText"), insertTextAction);
     connect(insertTextAction, &QAction::triggered, this, [this] {
-        if (!confirmRewrite(tr("插入文字頁面"))) return;
-
         bool accepted = false;
         const QString text = QInputDialog::getMultiLineText(
             this, tr("插入文字頁面"), tr("要排版成頁面的文字："), QString(), &accepted);
@@ -6063,6 +6997,7 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
             controller_->pageCount() + 1, 1, controller_->pageCount() + 1, 1, &accepted);
         if (!accepted) return;
 
+        if (!confirmRewrite(tr("插入文字頁面"))) return;
         commitPageOperation(tr("插入文字頁面"), [this, text, before] {
             return pageOps_->insertPagesFromText(currentPath_, text, before - 1,
                                                  app::RewriteConsent::confirmed());
@@ -6076,11 +7011,18 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     connect(labelsAction, &QAction::triggered, this, [this] { editPageLabels(); });
     menu->addSeparator();
 
-    auto* mergeAction = menu->addAction(tr("合併頁面（N 頁併一頁）..."));
-    registerRibbonAction(QStringLiteral("page.move"), mergeAction);
-    connect(mergeAction, &QAction::triggered, this, [this] {
-        if (!confirmRewrite(tr("合併頁面"))) return;
+    // 移動頁面（PRD-NAV-004 的非拖曳入口）。
+    //
+    // 先前 Ribbon 的「移動」接到的是底下那顆「N 頁併一頁」——使用者按了
+    // 「移動」會被問「每張要放幾頁」，確認之後前 N 頁被合成一頁，而那是
+    // 一次全檔重寫。兩件事的後果差太多，不能共用一個 id。
+    auto* movePagesAction = menu->addAction(tr("移動頁面..."));
+    registerRibbonAction(QStringLiteral("page.move"), movePagesAction);
+    connect(movePagesAction, &QAction::triggered, this, [this] { movePagesByRange(); });
 
+    auto* mergeAction = menu->addAction(tr("合併頁面（N 頁併一頁）..."));
+    registerRibbonAction(QStringLiteral("page.nUp"), mergeAction);
+    connect(mergeAction, &QAction::triggered, this, [this] {
         bool accepted = false;
         const int perSheet = QInputDialog::getInt(this, tr("合併頁面"),
                                                   tr("每張要放幾頁？"), 2, 2, 16, 1, &accepted);
@@ -6094,6 +7036,7 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
             return;
         }
 
+        if (!confirmRewrite(tr("合併頁面"))) return;
         const domain::compose::MergeLayout layout = domain::compose::MergeLayout::nUp(perSheet);
         commitPageOperation(tr("合併頁面"), [this, pages, layout] {
             return pageOps_->mergePages(currentPath_, pages, layout,
@@ -6103,10 +7046,10 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
 
     auto* overlayAction = menu->addAction(tr("疊加另一份文件..."));
     connect(overlayAction, &QAction::triggered, this, [this] {
-        if (!confirmRewrite(tr("疊加"))) return;
         const QString other = QFileDialog::getOpenFileName(this, tr("選擇要疊上的 PDF"), QString(),
                                                            tr("PDF 文件 (*.pdf)"));
         if (other.isEmpty()) return;
+        if (!confirmRewrite(tr("疊加"))) return;
 
         domain::compose::OverlayOptions options;
         commitPageOperation(tr("疊加"), [this, other, options] {
@@ -6118,8 +7061,6 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     auto* replaceAction = menu->addAction(tr("取代頁面..."));
     registerRibbonAction(QStringLiteral("page.replace"), replaceAction);
     connect(replaceAction, &QAction::triggered, this, [this] {
-        if (!confirmRewrite(tr("取代頁面"))) return;
-
         bool accepted = false;
         const int page = QInputDialog::getInt(this, tr("取代頁面"), tr("要取代第幾頁？"),
                                               pageView_->pageIndex() + 1, 1,
@@ -6130,6 +7071,7 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
                                                            tr("PDF 文件 (*.pdf)"));
         if (other.isEmpty()) return;
 
+        if (!confirmRewrite(tr("取代頁面"))) return;
         commitPageOperation(tr("取代頁面"), [this, other, page] {
             return pageOps_->replacePages(currentPath_, other, page - 1, page - 1,
                                           app::RewriteConsent::confirmed());
@@ -6221,28 +7163,23 @@ void MainWindow::buildOrganizeMenu(QMenu* menu) {
     // 存檔後別人打開也是轉過的；檢視旋轉只影響這個視窗的顯示。
     // 兩者共存是刻意的——掃描歪了要改檔案，臨時看橫式表格只要轉畫面。
     menu->addSeparator();
+    // 範圍可選，預設目前這一頁。
+    //
+    // 先前三個動作都把 0..N-1 全部丟進去：掃描件只有一頁歪掉時沒有辦法，
+    // 而 Ribbon 上那顆按鈕就叫「旋轉頁面」——使用者按下去會把整份文件轉掉。
     const auto addRotate = [&](const QString& text, domain::pages::PageRotation rotation,
                                const QString& id) {
         auto* action = menu->addAction(text);
-        connect(action, &QAction::triggered, this, [this, rotation, text] {
-            if (currentPath_.isEmpty() || !controller_->isOpen()) return;
-            if (!confirmRewrite(text)) return;
-            std::vector<int> pages;
-            pages.reserve(static_cast<std::size_t>(controller_->pageCount()));
-            for (int i = 0; i < controller_->pageCount(); ++i) pages.push_back(i);
-            commitPageOperation(text, [this, pages, rotation] {
-                return pageOps_->rotatePages(currentPath_, pages, rotation,
-                                             app::RewriteConsent::confirmed());
-            });
-        });
+        connect(action, &QAction::triggered, this,
+                [this, rotation, text] { rotatePagesByRange(text, rotation); });
         registerRibbonAction(id, action);
         return action;
     };
-    addRotate(tr("向右旋轉所有頁面"), domain::pages::PageRotation::Clockwise90,
+    addRotate(tr("向右旋轉頁面..."), domain::pages::PageRotation::Clockwise90,
               QStringLiteral("page.rotate"));
-    addRotate(tr("向左旋轉所有頁面"), domain::pages::PageRotation::CounterClockwise90,
+    addRotate(tr("向左旋轉頁面..."), domain::pages::PageRotation::CounterClockwise90,
               QStringLiteral("page.rotateLeft"));
-    addRotate(tr("旋轉所有頁面 180 度"), domain::pages::PageRotation::Half,
+    addRotate(tr("旋轉頁面 180 度..."), domain::pages::PageRotation::Half,
               QStringLiteral("page.rotate180"));
 
     menu->addSeparator();
@@ -6335,7 +7272,9 @@ void MainWindow::storeSession() {
 
 void MainWindow::closeEvent(QCloseEvent* event) {
     storeReadingPosition();
-    storeSession();
+    // 只有主視窗擁有工作階段。分離視窗也寫的話，關掉它會把主視窗那一組
+    // 頁籤蓋成「那一份被拖出去的文件」，下次啟動就只剩它。
+    if (role_ == WindowRole::Primary) storeSession();
     QMainWindow::closeEvent(event);
 }
 
@@ -6375,8 +7314,12 @@ void MainWindow::applyHighlight() {
 void MainWindow::reloadCurrentDocument() {
     if (currentPath_.isEmpty()) return;
     // 檔案內容已經變了，重新載入才看得到結果。
+    //
+    // 走 reloadDocument() 而不是 openDocument()：後者發的是 documentOpened，
+    // 而那個訊號的語意是「換了一份新文件」——檢視區會跳回第 1 頁、縮放重設、
+    // 縮圖捲回頂端。使用者在第 40 頁加一個註解，畫面就回到第 1 頁。
     selection_->clearSelection();
-    controller_->openDocument(currentPath_);
+    controller_->reloadDocument();
     selection_->openDocument(currentPath_);
 }
 

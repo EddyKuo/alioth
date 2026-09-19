@@ -38,6 +38,9 @@ enum class Tool {
     // 與 Rectangle 走同一條拖曳路徑，差別只在放開時做什麼。
     AreaSelect,  // 區域內的文字複製為 TSV
     Snapshot,    // 區域渲染成影像複製到剪貼簿
+    // 框一塊區域，放開後讓它填滿可視區（PRD-ZOOM-004）。換算邏輯在
+    // domain::computeRectZoom，這裡只是它的手勢入口。
+    ZoomArea,
     // 框出一塊待塗黑的區域（PRD-ANN-033）。走與 AreaSelect 相同的拖曳路徑，
     // 差別只在放開時做什麼——標記本身是一則 /Redact 註解，可逆。
     RedactMark,
@@ -89,6 +92,13 @@ public:
              QWidget* parent = nullptr);
 
     void setPageIndex(std::int32_t index);
+    // 讓某一頁上的一塊矩形填滿可視區（PRD-ZOOM-004）。
+    // 座標換算留在這裡而不是呼叫端：版面與倍率都是這個元件擁有的。
+    void zoomToPageRect(std::int32_t pageIndex, const domain::RectF& pageRect);
+    // 取消正在進行的手勢（多邊形／折線的頂點收集、形狀拖曳、鉛筆筆畫）。
+    // 回傳是否真的取消了什麼——Esc 由主視窗集中分派，它需要知道這一層
+    // 有沒有接手，才能決定要不要往下傳給簡報模式。
+    bool cancelPendingGesture();
     [[nodiscard]] std::int32_t pageIndex() const noexcept { return pageIndex_; }
 
     void setScale(double scale);

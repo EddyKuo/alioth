@@ -215,7 +215,8 @@ bool PrintService::renderSheet(QPainter& painter, const SheetPlan& sheet,
     return ok;
 }
 
-PrintResult PrintService::print(QPrinter& printer, const PrintOptions& options) {
+PrintResult PrintService::print(QPrinter& printer, const PrintOptions& options,
+                                const SheetCallback& onSheet) {
     PrintResult out;
     if (!isOpen()) {
         out.message = QStringLiteral("尚未開啟文件");
@@ -293,11 +294,22 @@ PrintResult PrintService::print(QPrinter& printer, const PrintOptions& options) 
         paintStamps(painter, printable, options.stamps, context, deviceScale);
         if (!sheet.batesText.isEmpty()) out.batesNumbers.push_back(sheet.batesText);
         ++out.sheetsPrinted;
+
+        // 回報進度並讓呼叫端有機會取消。取消發生在「這一張已經畫完」之後，
+        // 不是中途——半張紙送出去比多送一張更糟。
+        if (onSheet && !onSheet(out.sheetsPrinted, static_cast<int>(plan.sheets.size()))) {
+            out.cancelled = true;
+            break;
+        }
     }
 
     painter.end();
     out.ok = ok;
-    if (ok) out.message = QStringLiteral("已送出 %1 張").arg(out.sheetsPrinted);
+    if (ok) {
+        out.message = out.cancelled
+                          ? QStringLiteral("已取消；取消前已送出 %1 張").arg(out.sheetsPrinted)
+                          : QStringLiteral("已送出 %1 張").arg(out.sheetsPrinted);
+    }
     return out;
 }
 

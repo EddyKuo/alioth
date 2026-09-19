@@ -85,6 +85,7 @@ Layout defaultLayout() {
                         small("session.restore", "復原工作階段"),
                         small("app.preferences", "偏好設定"),
                         small("app.manageSettings", "管理設定"),
+                        small("file.manageExternalTools", "管理外部程式"),
                         small("file.auditSpace", "空間使用稽核")}),
              }),
 
@@ -97,10 +98,12 @@ Layout defaultLayout() {
                        {large("tool.select", "選取文字"), large("tool.hand", "手形"),
                         large("tool.selectComments", "選取註解"),
                         small("tool.snapshot", "快照"), small("tool.zoomArea", "區域縮放"),
+                        small("tool.areaSelect", "區域選取"),
                         small("tool.persistent", "工具持續模式")}),
                  group("home.markup", "快速標記",
                        {large("annot.highlight", "螢光筆"), small("annot.underline", "底線"),
-                        small("annot.strikeout", "刪除線"), small("annot.stickyNote", "便利貼")}),
+                        small("annot.strikeout", "刪除線"), small("annot.stickyNote", "便利貼"),
+                        small("annot.highlightSelection", "標記選取的文字")}),
                  group("home.find", "尋找",
                        {large("search.find", "尋找"), small("search.advanced", "進階搜尋"),
                         small("search.findNext", "找下一個")}),
@@ -117,6 +120,16 @@ Layout defaultLayout() {
                        {large("view.singlePage", "單頁"), small("view.continuous", "連續"),
                         small("view.twoPage", "雙頁"), small("view.horizontal", "左右排列"),
                         small("view.coverPage", "封面模式")}),
+                 // 顯示選項先前只掛在傳統選單上，而傳統選單預設是隱藏的——
+                 // 等於 Ribbon 模式的使用者沒有夜間模式，也切不了主題。
+                 group("view.display", "顯示",
+                       {large("view.readAloudToggle", "朗讀"),
+                        small("view.autoscroll", "自動捲動"),
+                        small("view.grayscale", "灰階預覽"),
+                        small("view.smoothText", "平滑文字"),
+                        small("view.theme.light", "淺色主題"),
+                        small("view.theme.dark", "深色主題"),
+                        small("view.theme.system", "跟隨系統")}),
                  // 瀏覽歷史（PRD-NAV-001）。放在檢視分頁而不是常用分頁：
                  // 它改變的是「看哪裡」，與縮放、版面同一類。
                  // 跳頁（對標 PDF-XChange 的 View / Go To）。鍵盤本來就走得到，
@@ -168,6 +181,8 @@ Layout defaultLayout() {
                         small("view.presentation", "簡報模式"),
                         small("view.splitHorizontal", "水平分割"),
                         small("view.splitVertical", "垂直分割"),
+                        small("view.splitQuad", "四格分割"),
+                        small("view.customizeRibbon", "自訂 Ribbon"),
                         small("view.classicMenu", "切換傳統選單")}),
              }),
 
@@ -195,9 +210,12 @@ Layout defaultLayout() {
                         small("comment.showAll", "顯示所有註解")}),
                  group("comment.manage", "管理",
                        {large("comment.list", "註解清單"), small("comment.reply", "回覆"),
-                        small("comment.delete", "刪除註解"), small("comment.setStatus", "設定狀態"), small("comment.summarize", "彙整"),
+                        small("comment.delete", "刪除註解"), small("comment.setStatus", "設定狀態"),
+                        small("annot.properties", "註解屬性"),
+                        small("comment.summarize", "彙整"),
                         small("comment.import", "匯入"), small("comment.export", "匯出"),
-                        small("comment.exportSelected", "匯出選定")}),
+                        small("comment.exportSelected", "匯出選定"),
+                        small("comment.flatten", "攤平註解")}),
              }),
 
         page("protect", "保護", "P",
@@ -209,10 +227,14 @@ Layout defaultLayout() {
                  group("protect.redact", "塗黑",
                        {large("protect.redactMark", "標記塗黑"),
                         small("protect.redactApply", "套用塗黑"),
+                        small("protect.redactClear", "移除塗黑標記"),
                         small("protect.sanitize", "清除隱藏資訊")}),
+                 // 認證文件（PRD-SIG-007）與時間戳（PRD-SIG-006）都排在 R3，
+                 // 這裡不放按鈕：一顆永遠灰色的按鈕傳達的是「這個功能壞了」，
+                 // 而時間戳的規劃狀態在簽署對話框裡已經講清楚了。
                  group("protect.signature", "簽章",
-                       {large("sign.digitalSign", "數位簽署"), small("sign.certify", "認證文件"),
-                        small("sign.validate", "驗證簽章"), small("sign.timestamp", "時間戳記"),
+                       {large("sign.digitalSign", "數位簽署"),
+                        small("sign.validate", "驗證簽章"),
                         small("sign.digitalIds", "信任的憑證"),
                         small("sign.clearAll", "清除所有簽章欄位")}),
              }),
@@ -225,9 +247,10 @@ Layout defaultLayout() {
                         small("form.listBox", "清單方塊"), small("form.pushButton", "按鈕")}),
                  group("form.signature", "簽章欄位",
                        {large("form.signatureField", "簽章欄位")}),
+                 // Tab 順序編輯尚未實作，因此不放按鈕——見上面簽章群組的同一個理由。
                  group("form.tools", "表單工具",
                        {large("form.highlightFields", "標示欄位"),
-                        small("form.tabOrder", "Tab 順序"), small("form.resetForm", "重設表單"),
+                        small("form.resetForm", "重設表單"),
                         small("form.importData", "匯入資料"),
                         small("form.exportData", "匯出資料")}),
              }),
@@ -243,29 +266,37 @@ Layout defaultLayout() {
                         small("page.duplicate", "複製頁面")}),
                  group("organize.transform", "版面調整",
                        {large("page.rotate", "旋轉頁面"), small("page.crop", "裁切"),
-                        small("page.resize", "調整尺寸")}),
+                        small("page.resize", "調整尺寸"),
+                        // 「移動」先前指到的就是這一顆，而它問的是「每張要放幾頁」。
+                        // 兩件事的後果差太多，不能共用一個 id。
+                        small("page.nUp", "N 頁併一頁")}),
                  group("organize.documents", "文件",
                        {large("document.merge", "合併"), small("document.split", "分割"),
                         small("document.compare", "比較")}),
+                 // 「背景」（畫在內容之下）與浮水印（畫在內容之上）不是同一件事，
+                 // 而戳記通道目前只能畫在上面。沒有實作就不放按鈕。
                  group("organize.stamping", "頁面標記",
                        {large("page.watermark", "浮水印"), small("page.headerFooter", "頁首頁尾"),
-                        small("page.background", "背景"), small("page.bates", "Bates 編號"),
+                        small("page.bates", "Bates 編號"),
                         small("page.removeStamps", "移除所有標記")}),
+                 // 「新增書籤」加的是使用者端的閱讀標記（PRD-NAV-005），
+                 // 不寫進文件的 /Outlines——名字要說實話，否則使用者按完會去
+                 // 書籤面板找一個不存在的東西。
                  group("organize.bookmarks", "書籤",
-                       {large("bookmark.add", "新增書籤"), small("bookmark.manage", "管理書籤"),
+                       {large("nav.mark", "加入閱讀標記"),
+                        small("bookmark.manage", "書籤面板"),
                         small("bookmark.expandAll", "全部展開"),
                         small("bookmark.collapseAll", "全部收合")}),
              }),
 
+        // 說明主題、版本資訊、檢查更新、回報問題四者都需要一份內容或一個
+        // 端點，而兩者目前都不存在。放上去只會是四顆永遠灰色的按鈕——
+        // 使用者看到的是「這個產品的說明壞了」，而不是「還沒做」。
         page("help", "說明", "Y",
              {
                  group("help.docs", "說明文件",
-                       {large("help.contents", "說明主題"), small("help.shortcuts", "快捷鍵一覽"),
-                        small("help.releaseNotes", "版本資訊")}),
-                 group("help.support", "支援",
-                       {large("help.checkUpdates", "檢查更新"),
-                        small("help.reportIssue", "回報問題"), small("help.license", "授權資訊"),
-                        small("help.about", "關於")}),
+                       {large("help.shortcuts", "快捷鍵一覽"),
+                        small("help.license", "授權資訊"), small("help.about", "關於")}),
              }),
     };
     return layout;

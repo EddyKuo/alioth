@@ -71,6 +71,13 @@ public:
     ~DocumentController() override;
 
     void openDocument(const QString& path, const QString& password = {});
+    // 重新讀取目前這一份文件。
+    //
+    // 與 openDocument 分開是必要的，不是整潔：每一次寫入都要重載，而重載若
+    // 走開檔那條路，呈現層收到的是 documentOpened——那個訊號的語意是「換了
+    // 一份新文件」，於是檢視區跳回第 1 頁、縮放重設、縮圖捲回頂端。
+    // 使用者在第 40 頁加一個註解，畫面就回到第 1 頁。
+    void reloadDocument();
     void closeDocument();
 
     [[nodiscard]] bool isOpen() const noexcept { return open_; }
@@ -105,8 +112,9 @@ public:
     // 而不是滑鼠每動一格就問一次引擎。
     void requestLinks(std::int32_t pageIndex);
     [[nodiscard]] const std::vector<domain::LinkTarget>& linksForPage(std::int32_t pageIndex) const;
-    // 註解列表（PRD-ANN-008）。只掃目前可見的頁面範圍，
-    // 一次掃一萬頁在大型文件上等於凍結介面。
+    // 註解列表（PRD-ANN-008）。只掃**還沒掃過**的頁面並併進既有結果：
+    // 使用者捲到哪就補到哪，而不是每次都整份重來。開檔與重載會清掉
+    // 「掃過了」的紀錄。
     void requestAnnotations(std::int32_t fromPage, std::int32_t toPage);
     void requestThumbnail(std::int32_t pageIndex, std::int32_t maxEdgePixels = 160);
 
@@ -166,6 +174,9 @@ public:
 
 signals:
     void documentOpened(const QString& path);
+    // 同一份文件被重新讀取（例如寫入之後）。呈現層對這個訊號**不可以**
+    // 重設檢視位置——使用者還在他剛才那一頁。
+    void documentReloaded(const QString& path);
     void documentOpenFailed(int error, const QString& message);
     void documentClosed();
     void autosaved(const QString& path);
@@ -182,6 +193,9 @@ signals:
 private:
     void requestTile(const domain::TileKey& key, domain::TaskPriority priority);
     void loadPageGeometry();
+    // 開檔與重載只差最後發哪一個訊號，其餘完全相同——兩份幾乎一樣的程式碼
+    // 必然會在某次修改後分岔。
+    void openInternal(const QString& path, const QString& password, bool reload);
 
     std::unique_ptr<engine::PdfiumEngine> engine_;
     engine::TileCache cache_;
@@ -213,8 +227,14 @@ private:
     class QTimer* autosaveTimer_{nullptr};
     TileScheduleOptions lastOptions_{};
     QString path_;
+    // 重載要用同一組密碼重新開檔。不留著的話，加密文件在第一次寫入之後
+    // 就再也開不起來——而使用者剛剛才輸入過。
+    QString password_;
     std::vector<domain::OutlineNode> outline_;
     std::vector<domain::AnnotationSummary> annotations_;
+    // 哪幾頁的註解已經掃過。少了這張表，「捲到哪補到哪」會在每次捲動時
+    // 對同一批頁面重送請求，而那條 PDFium 執行緒是全行程唯一的一條。
+    std::vector<bool> annotationPagesLoaded_;
     std::unordered_map<std::int32_t, std::vector<domain::LinkTarget>> links_;
     domain::OcgTree layers_;
     // 圖層解析的背景執行緒。刻意不 detach：detach 後若 DocumentController

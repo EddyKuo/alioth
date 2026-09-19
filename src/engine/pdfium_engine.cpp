@@ -536,6 +536,16 @@ void PdfiumEngine::pageInfo(std::int32_t pageIndex,
 }
 
 
+// 註解掃描**不可**被 discardPending 丟掉。與 pageInfo、renderThumbnail 同一個坑。
+//
+// scheduleTiles 每次可視區變動都會 discardPending(Prefetch)，而那個條件是
+// 「優先權數值 >= Prefetch」——Background 數值更大，所以一併中彈。被丟掉的
+// 任務不會呼叫 callback，而呼叫端是用「最後一頁回來時才發訊號」的計數器在
+// 等：少一個回呼，計數永遠到不了零，annotationsReady 就永遠不發。
+//
+// 症狀是註解清單停在空的（或停在舊的），而模型裡其實已經有資料——
+// 沒有錯誤訊息，看起來像面板壞了。開檔後幾毫秒內檢視區必然排版一次，
+// 所以這條路徑幾乎每次開檔都會中。
 void PdfiumEngine::pageAnnotations(
     std::int32_t pageIndex,
     std::function<void(std::vector<domain::AnnotationSummary>)> callback) {
@@ -582,7 +592,7 @@ void PdfiumEngine::pageAnnotations(
         }
 
         if (callback) callback(std::move(summaries));
-    });
+    }, {}, /*discardable=*/false);
 }
 
 void PdfiumEngine::pageLinks(std::int32_t pageIndex,

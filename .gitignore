@@ -20,3 +20,11 @@ third_party/fonts/*.otf
 
 # Python 產生的位元組碼（tools/ 底下的腳本被匯入時會產生）。
 __pycache__/
+
+# AI 工作流設定與開發過程記錄。留在本機，不進 remote：
+# .claude/ 是 agent / skill / hook 定義與本機權限白名單（settings.local.json
+# 還帶著其他專案的路徑），sprint/ 與 exceptions/ 是過程記錄而非產品的一部分。
+# 2026-09-19 從歷史裡一併移除（見 CLAUDE.md 對 exceptions/ 的引用已失效）。
+.claude/
+sprint/
+exceptions/

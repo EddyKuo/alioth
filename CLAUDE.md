@@ -277,6 +277,11 @@ PRD 附錄 C 有完整速查表（載入、圖磚渲染、文字、註解、表�
 
 ## 團隊框架
 
+> `.claude/`、`sprint/`、`exceptions/` 只存在於開發機，不進版控（見 `.gitignore`）。
+> 下面這一節與前面對 `exceptions/` 的引用，在 clone 下來的樹裡指不到東西——
+> 那些是 AI 工作流設定與過程記錄，不是產品的一部分。實測結論與「為什麼沒做」
+> 該進版控的部分寫在 `.decisions/` 的 ADR 裡。
+
 `.claude/CLAUDE.md` 是團隊憲法（三層架構、契約系統、例外處理、品質門檻），與本文件並存：憲法規範**怎麼協作**，本文件規範**這個專案本身**。憲法本體不可直接修改，需建立 ADR 並升版。
 
 - 憲法 Section 7（Global Tech Stack）與 7.1（project_complexity）**尚未填寫**。依 PRD 規模，本案為 `L`（Enterprise）：跨模組、多平台、21 個月。SA / DBA / RD 節點在填寫前應視為 BLOCKED。

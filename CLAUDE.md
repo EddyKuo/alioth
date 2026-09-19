@@ -277,10 +277,11 @@ PRD 附錄 C 有完整速查表（載入、圖磚渲染、文字、註解、表�
 
 ## 團隊框架
 
-> `.claude/`、`sprint/`、`exceptions/` 只存在於開發機，不進版控（見 `.gitignore`）。
-> 下面這一節與前面對 `exceptions/` 的引用，在 clone 下來的樹裡指不到東西——
-> 那些是 AI 工作流設定與過程記錄，不是產品的一部分。實測結論與「為什麼沒做」
-> 該進版控的部分寫在 `.decisions/` 的 ADR 裡。
+> `.claude/`、`sprint/`、`exceptions/`、`.decisions/`、`.github/` 與 PRD 本體
+> 只存在於開發機，不進版控（見 `.gitignore`）。下面這一節，以及本文件各處對
+> `exceptions/`、`.decisions/ADR_*`、PRD 章節的引用，在 clone 下來的樹裡都指不到東西。
+> 兩個直接的代價：`ci.bat` 第 4 關（`tools/traceability.py`）讀的就是那份 PRD，
+> 沒有它必失敗；`.github/workflows/ci.yml` 不在，GitHub 端也不再跑 CI。
 
 `.claude/CLAUDE.md` 是團隊憲法（三層架構、契約系統、例外處理、品質門檻），與本文件並存：憲法規範**怎麼協作**，本文件規範**這個專案本身**。憲法本體不可直接修改，需建立 ADR 並升版。
 

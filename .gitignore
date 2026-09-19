@@ -28,3 +28,10 @@ __pycache__/
 .claude/
 sprint/
 exceptions/
+
+# 需求與決策文件、CI 設定。與上面同一個決定（2026-09-19）：留在本機不進 remote。
+# 代價要知道：ci.bat 第 4 關（tools/traceability.py）讀的就是這份 PRD，
+# 沒有它那一關必失敗；.github/workflows/ci.yml 拿掉之後 GitHub 端不再跑 CI。
+.decisions/
+.github/
+PRD_跨平台專業PDF審閱工作站_v2.1.md
